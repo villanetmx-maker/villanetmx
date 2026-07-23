@@ -1,236 +1,28 @@
+/**
+ * index.js
+ * VillaNet MX - Backend principal
+ * Arranca el servidor web (para futuros webhooks/endpoints) y el cron de cortes.
+ */
+
 const express = require('express');
-const cors = require('cors');
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-const supabase = require('./supabaseClient');
-const mikrotik = require('./mikrotikService');
-
+// Arranca el cron de revisión de pagos/cortes automáticos
 require('./cronCorteISP');
 
+// Endpoint simple de salud, para confirmar que el servicio está vivo
 app.get('/', (req, res) => {
   res.send('VillaNet MX backend activo');
 });
 
+// Endpoint de prueba manual: ver estado de conexión de un cliente
+// Ejemplo de uso: GET /estado/cliente001
+const mikrotik = require('./mikrotikService');
 app.get('/estado/:secretName', async (req, res) => {
   try {
     const estado = await mikrotik.estadoConexion(req.params.secretName);
     res.json(estado);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/planes', async (req, res) => {
-  const { data, error } = await supabase
-    .from('planes_isp')
-    .select('*')
-    .eq('activo', true)
-    .order('precio', { ascending: true });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-app.get('/api/clientes', async (req, res) => {
-  const { data, error } = await supabase
-    .from('clientes_isp')
-    .select('*, planes_isp(nombre, precio, velocidad_bajada, velocidad_subida)')
-    .order('numero_cuenta', { ascending: true });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-app.get('/api/clientes/:id', async (req, res) => {
-  const { data: cliente, error } = await supabase
-    .from('clientes_isp')
-    .select('*, planes_isp(nombre, precio, velocidad_bajada, velocidad_subida)')
-    .eq('id', req.params.id)
-    .single();
-  if (error) return res.status(404).json({ error: 'Cliente no encontrado' });
-
-  const { data: pagos } = await supabase
-    .from('pagos_isp')
-    .select('*')
-    .eq('cliente_id', req.params.id)
-    .order('fecha_pago', { ascending: false });
-
-  res.json({ cliente, pagos: pagos || [] });
-});
-
-app.post('/api/clientes', async (req, res) => {
-  const { nombre, telefono, direccion, plan_id, dia_corte, password } = req.body;
-  if (!nombre || !plan_id || !password) {
-    return res.status(400).json({ error: 'nombre, plan_id y password son requeridos' });
-  }
-
-  try {
-    const { data: plan, error: planError } = await supabase
-      .from('planes_isp')
-      .select('*')
-      .eq('id', plan_id)
-      .single();
-    if (planError) throw new Error('Plan no encontrado');
-
-    const { data: existentes } = await supabase
-      .from('clientes_isp')
-      .select('mikrotik_secret_name, numero_cuenta')
-      .order('id', { ascending: false })
-      .limit(1);
-
-    let siguienteNum = 1;
-    if (existentes && existentes.length > 0) {
-      const ultimo = existentes[0].mikrotik_secret_name.replace('cliente', '');
-      siguienteNum = parseInt(ultimo, 10) + 1;
-    }
-    const secretName = 'cliente' + String(siguienteNum).padStart(3, '0');
-    const numeroCuenta = 'VN-' + String(siguienteNum).padStart(3, '0');
-
-    await mikrotik.crearCliente({
-      nombre_secret: secretName,
-      password,
-      profile: plan.mikrotik_profile_name,
-    });
-
-    const { data: nuevo, error: insertError } = await supabase
-      .from('clientes_isp')
-      .insert({
-        nombre,
-        telefono,
-        direccion,
-        plan_id,
-        mikrotik_secret_name: secretName,
-        mikrotik_password: password,
-        numero_cuenta: numeroCuenta,
-        dia_corte: dia_corte || 30,
-        estado: 'activo',
-      })
-      .select()
-      .single();
-
-    if (insertError) throw new Error(insertError.message);
-
-    res.json({ ok: true, cliente: nuevo });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/clientes/:id', async (req, res) => {
-  const { nombre, telefono, direccion, plan_id, dia_corte } = req.body;
-
-  try {
-    const { data: clienteActual, error: fetchError } = await supabase
-      .from('clientes_isp')
-      .select('*, planes_isp(mikrotik_profile_name)')
-      .eq('id', req.params.id)
-      .single();
-    if (fetchError) throw new Error('Cliente no encontrado');
-
-    if (plan_id && plan_id !== clienteActual.plan_id) {
-      const { data: nuevoPlan, error: planError } = await supabase
-        .from('planes_isp')
-        .select('mikrotik_profile_name')
-        .eq('id', plan_id)
-        .single();
-      if (planError) throw new Error('Plan nuevo no encontrado');
-      await mikrotik.cambiarPlan(clienteActual.mikrotik_secret_name, nuevoPlan.mikrotik_profile_name);
-    }
-
-    const { data: actualizado, error: updateError } = await supabase
-      .from('clientes_isp')
-      .update({ nombre, telefono, direccion, plan_id, dia_corte })
-      .eq('id', req.params.id)
-      .select()
-      .single();
-    if (updateError) throw new Error(updateError.message);
-
-    res.json({ ok: true, cliente: actualizado });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/clientes/:id/suspender', async (req, res) => {
-  try {
-    const { data: cliente, error } = await supabase
-      .from('clientes_isp')
-      .select('mikrotik_secret_name')
-      .eq('id', req.params.id)
-      .single();
-    if (error) throw new Error('Cliente no encontrado');
-
-    await mikrotik.suspenderCliente(cliente.mikrotik_secret_name);
-    await supabase.from('clientes_isp').update({ estado: 'suspendido' }).eq('id', req.params.id);
-
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/clientes/:id/reactivar', async (req, res) => {
-  try {
-    const { data: cliente, error } = await supabase
-      .from('clientes_isp')
-      .select('mikrotik_secret_name')
-      .eq('id', req.params.id)
-      .single();
-    if (error) throw new Error('Cliente no encontrado');
-
-    await mikrotik.reactivarCliente(cliente.mikrotik_secret_name);
-    await supabase.from('clientes_isp').update({ estado: 'activo' }).eq('id', req.params.id);
-
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/clientes/:id/baja', async (req, res) => {
-  try {
-    const { data: cliente, error } = await supabase
-      .from('clientes_isp')
-      .select('mikrotik_secret_name')
-      .eq('id', req.params.id)
-      .single();
-    if (error) throw new Error('Cliente no encontrado');
-
-    await mikrotik.suspenderCliente(cliente.mikrotik_secret_name);
-    await supabase.from('clientes_isp').update({ estado: 'baja' }).eq('id', req.params.id);
-
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/pagos', async (req, res) => {
-  const { cliente_id, monto, mes_correspondiente, metodo } = req.body;
-  if (!cliente_id || !monto || !mes_correspondiente) {
-    return res.status(400).json({ error: 'cliente_id, monto y mes_correspondiente son requeridos' });
-  }
-
-  try {
-    const { data: pago, error: insertError } = await supabase
-      .from('pagos_isp')
-      .insert({ cliente_id, monto, mes_correspondiente, metodo })
-      .select()
-      .single();
-    if (insertError) throw new Error(insertError.message);
-
-    const { data: cliente } = await supabase
-      .from('clientes_isp')
-      .select('mikrotik_secret_name, estado')
-      .eq('id', cliente_id)
-      .single();
-
-    if (cliente && cliente.estado === 'suspendido') {
-      await mikrotik.reactivarCliente(cliente.mikrotik_secret_name);
-      await supabase.from('clientes_isp').update({ estado: 'activo' }).eq('id', cliente_id);
-    }
-
-    res.json({ ok: true, pago });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

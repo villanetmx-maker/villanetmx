@@ -12,14 +12,9 @@
  */
 
 const cron = require('node-cron');
-const { createClient } = require('@supabase/supabase-js');
+const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
 // const { enviarWhatsApp } = require('./whatsappService'); // reutilizar el que ya tienes en La Pape
-
-const supabase = createClient(
-  process.env.VILLANET_SUPABASE_URL,
-  process.env.VILLANET_SUPABASE_SERVICE_KEY
-);
 
 async function revisarPagosYActualizarServicio() {
   console.log(`[${new Date().toISOString()}] Iniciando revisión de pagos ISP...`);

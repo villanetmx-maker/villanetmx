@@ -116,9 +116,46 @@ async function estadoConexion(nombre_secret) {
   };
 }
 
+/**
+ * Cambia el plan (profile) de un cliente en el MikroTik
+ */
+async function cambiarPlan(nombre_secret, nuevoProfile) {
+  const api = await conectar();
+  const secrets = await api.write('/ppp/secret/print', [
+    `?name=${nombre_secret}`,
+  ]);
+  if (secrets.length === 0) {
+    throw new Error(`Cliente ${nombre_secret} no encontrado en MikroTik`);
+  }
+  const id = secrets[0]['.id'];
+  await api.write('/ppp/secret/set', [
+    `=.id=${id}`,
+    `=profile=${nuevoProfile}`,
+  ]);
+  return { ok: true };
+}
+
+/**
+ * Elimina un cliente del MikroTik (usar con cuidado, es irreversible)
+ */
+async function eliminarCliente(nombre_secret) {
+  const api = await conectar();
+  const secrets = await api.write('/ppp/secret/print', [
+    `?name=${nombre_secret}`,
+  ]);
+  if (secrets.length === 0) {
+    return { ok: true, nota: 'ya no existia en MikroTik' };
+  }
+  const id = secrets[0]['.id'];
+  await api.write('/ppp/secret/remove', [`=.id=${id}`]);
+  return { ok: true };
+}
+
 module.exports = {
   crearCliente,
   suspenderCliente,
   reactivarCliente,
   estadoConexion,
+  cambiarPlan,
+  eliminarCliente,
 };
