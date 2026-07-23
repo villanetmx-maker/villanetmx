@@ -24,7 +24,7 @@ app.get('/estado/:secretName', async (req, res) => {
     const estado = await mikrotik.estadoConexion(req.params.secretName);
     res.json(estado);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 
