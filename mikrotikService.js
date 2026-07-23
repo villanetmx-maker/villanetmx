@@ -151,6 +151,26 @@ async function eliminarCliente(nombre_secret) {
   return { ok: true };
 }
 
+/**
+ * Actualiza el rate-limit (velocidad) de un profile completo en MikroTik
+ * Esto afecta a TODOS los clientes que usan ese profile.
+ */
+async function actualizarVelocidadPerfil(nombreProfile, bajada, subida) {
+  const api = await conectar();
+  const profiles = await api.write('/ppp/profile/print', [
+    `?name=${nombreProfile}`,
+  ]);
+  if (profiles.length === 0) {
+    throw new Error(`Profile ${nombreProfile} no encontrado en MikroTik`);
+  }
+  const id = profiles[0]['.id'];
+  await api.write('/ppp/profile/set', [
+    `=.id=${id}`,
+    `=rate-limit=${bajada}/${subida}`,
+  ]);
+  return { ok: true };
+}
+
 module.exports = {
   crearCliente,
   suspenderCliente,
@@ -158,4 +178,5 @@ module.exports = {
   estadoConexion,
   cambiarPlan,
   eliminarCliente,
+  actualizarVelocidadPerfil,
 };
