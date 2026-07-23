@@ -24,26 +24,7 @@ app.get('/estado/:secretName', async (req, res) => {
     const estado = await mikrotik.estadoConexion(req.params.secretName);
     res.json(estado);
   } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
-  }
-});
-
-// ENDPOINTS TEMPORALES DE PRUEBA - quitar después de validar
-app.get('/test-suspender/:secretName', async (req, res) => {
-  try {
-    const resultado = await mikrotik.suspenderCliente(req.params.secretName);
-    res.json(resultado);
-  } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
-  }
-});
-
-app.get('/test-reactivar/:secretName', async (req, res) => {
-  try {
-    const resultado = await mikrotik.reactivarCliente(req.params.secretName);
-    res.json(resultado);
-  } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
+    res.status(500).json({ error: err.message });
   }
 });
 
