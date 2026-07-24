@@ -374,6 +374,109 @@ app.put('/api/tickets/:id', async (req, res) => {
   }
 });
 
+// ---------- Webhook de WhatsApp (bot de autoservicio para clientes) ----------
+const whatsappBot = require('./whatsappBotService');
+const VERIFY_TOKEN = process.env.VILLANET_WHATSAPP_VERIFY_TOKEN;
+
+// Verificación inicial que pide Meta al configurar el webhook
+app.get('/webhook/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+// Recepción de mensajes reales
+app.post('/webhook/whatsapp', async (req, res) => {
+  try {
+    const entry = req.body.entry && req.body.entry[0];
+    const change = entry && entry.changes && entry.changes[0];
+    const value = change && change.value;
+    const mensaje = value && value.messages && value.messages[0];
+
+    if (mensaje && mensaje.type === 'text') {
+      const telefono = mensaje.from;
+      const texto = mensaje.text.body;
+      await whatsappBot.manejarMensajeEntrante(telefono, texto);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('Error en webhook de WhatsApp:', err.message);
+    res.sendStatus(200); // siempre 200 para que Meta no reintente en bucle
+  }
+});
+
+app.get('/api/resumen', async (req, res) => {
+  try {
+    const { data: clientes } = await supabase
+      .from('clientes_isp')
+      .select('*, planes_isp(precio)');
+
+    const activos = clientes.filter((c) => c.estado === 'activo').length;
+    const suspendidos = clientes.filter((c) => c.estado === 'suspendido').length;
+    const bajas = clientes.filter((c) => c.estado === 'baja').length;
+
+    const primerDiaMes = new Date();
+    primerDiaMes.setDate(1);
+    primerDiaMes.setHours(0, 0, 0, 0);
+
+    const { data: pagosMes } = await supabase
+      .from('pagos_isp')
+      .select('monto')
+      .gte('fecha_pago', primerDiaMes.toISOString().slice(0, 10));
+
+    const ingresosMes = (pagosMes || []).reduce((sum, p) => sum + parseFloat(p.monto), 0);
+
+    // Calcular cuántos clientes (no dados de baja) tienen algún mes pendiente
+    const { data: todosPagos } = await supabase.from('pagos_isp').select('cliente_id, mes_correspondiente');
+
+    let clientesConAdeudo = 0;
+    const hoy = new Date();
+    const claveMesActual = hoy.toISOString().slice(0, 7);
+
+    for (const c of clientes.filter((c) => c.estado !== 'baja')) {
+      const mesesPagados = new Set(
+        (todosPagos || []).filter((p) => p.cliente_id === c.id).map((p) => p.mes_correspondiente.slice(0, 7))
+      );
+      const fechaAlta = new Date(c.fecha_alta);
+      const cursor = new Date(fechaAlta.getFullYear(), fechaAlta.getMonth(), 1);
+      const finMesActual = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+      let debe = false;
+      while (cursor <= finMesActual) {
+        const clave = cursor.toISOString().slice(0, 7);
+        if (!mesesPagados.has(clave)) {
+          debe = true;
+          break;
+        }
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+      if (debe) clientesConAdeudo++;
+    }
+
+    const { data: ticketsAbiertos } = await supabase
+      .from('reportes_falla_isp')
+      .select('id')
+      .neq('estado', 'resuelto');
+
+    res.json({
+      clientes_activos: activos,
+      clientes_suspendidos: suspendidos,
+      clientes_baja: bajas,
+      ingresos_mes: ingresosMes,
+      clientes_con_adeudo: clientesConAdeudo,
+      tickets_abiertos: (ticketsAbiertos || []).length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`VillaNet MX backend corriendo en puerto ${PORT}`);
