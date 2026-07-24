@@ -374,6 +374,43 @@ app.put('/api/tickets/:id', async (req, res) => {
   }
 });
 
+// ---------- Monitor del túnel VPN (reportado directo desde el MikroTik) ----------
+const MONITOR_TOKEN = process.env.VILLANET_MONITOR_TOKEN;
+
+app.post('/api/monitor-tunel', async (req, res) => {
+  const token = req.headers['x-monitor-token'];
+  if (token !== MONITOR_TOKEN) {
+    return res.status(401).json({ error: 'No autorizado' });
+  }
+
+  const { estado, detalle } = req.body;
+  try {
+    await supabase.from('monitor_tunel_log').insert({ estado, detalle });
+
+    // Si el túnel tuvo que repararse, aquí es donde en el futuro se
+    // dispara el aviso de WhatsApp a Alfredo (whatsappBot.enviarWhatsApp),
+    // en cuanto el número de VillaNet esté activo.
+    // if (estado === 'reparado') {
+    //   await whatsappBot.enviarWhatsApp('<telefono_admin>', `Alerta VillaNet: el túnel se cayó y se reparó solo. Detalle: ${detalle}`);
+    // }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/monitor-tunel/ultimo', async (req, res) => {
+  const { data, error } = await supabase
+    .from('monitor_tunel_log')
+    .select('*')
+    .order('creado_en', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || { estado: 'sin_datos' });
+});
+
 // ---------- Órdenes de servicio (visitas técnicas) ----------
 const { generarPdfOrdenServicio } = require('./ordenServicioPdf');
 
