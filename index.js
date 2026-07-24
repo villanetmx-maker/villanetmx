@@ -374,6 +374,135 @@ app.put('/api/tickets/:id', async (req, res) => {
   }
 });
 
+// ---------- Órdenes de servicio (visitas técnicas) ----------
+const { generarPdfOrdenServicio } = require('./ordenServicioPdf');
+
+app.get('/api/ordenes', async (req, res) => {
+  const { data, error } = await supabase
+    .from('ordenes_servicio')
+    .select('*, clientes_isp(nombre, numero_cuenta, telefono, direccion)')
+    .order('fecha_cita', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.post('/api/ordenes', async (req, res) => {
+  const { cliente_id, tipo_servicio, descripcion, fecha_cita, hora_cita, tecnico } = req.body;
+  if (!cliente_id || !tipo_servicio || !fecha_cita || !hora_cita) {
+    return res.status(400).json({ error: 'cliente_id, tipo_servicio, fecha_cita y hora_cita son requeridos' });
+  }
+
+  try {
+    // Generar folio consecutivo
+    const { data: ultima } = await supabase
+      .from('ordenes_servicio')
+      .select('folio')
+      .order('id', { ascending: false })
+      .limit(1);
+
+    let siguienteNum = 1;
+    if (ultima && ultima.length > 0) {
+      const num = parseInt(ultima[0].folio.replace('OS-', ''), 10);
+      siguienteNum = num + 1;
+    }
+    const folio = 'OS-' + String(siguienteNum).padStart(4, '0');
+
+    const { data: orden, error } = await supabase
+      .from('ordenes_servicio')
+      .insert({ folio, cliente_id, tipo_servicio, descripcion, fecha_cita, hora_cita, tecnico })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+
+    res.json({ ok: true, orden });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/ordenes/:id', async (req, res) => {
+  const { estado } = req.body;
+  try {
+    const { data, error } = await supabase
+      .from('ordenes_servicio')
+      .update({ estado })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, orden: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Genera y descarga el PDF de una orden (bajo demanda, no se guarda en disco)
+app.get('/api/ordenes/:id/pdf', async (req, res) => {
+  try {
+    const { data: orden, error } = await supabase
+      .from('ordenes_servicio')
+      .select('*, clientes_isp(nombre, numero_cuenta, telefono, direccion)')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Orden no encontrada');
+
+    const datosPdf = {
+      folio: orden.folio,
+      cliente_nombre: orden.clientes_isp ? orden.clientes_isp.nombre : '',
+      numero_cuenta: orden.clientes_isp ? orden.clientes_isp.numero_cuenta : '',
+      direccion: orden.clientes_isp ? orden.clientes_isp.direccion : '',
+      telefono: orden.clientes_isp ? orden.clientes_isp.telefono : '',
+      tipo_servicio: orden.tipo_servicio,
+      descripcion: orden.descripcion,
+      fecha_cita: orden.fecha_cita,
+      hora_cita: orden.hora_cita,
+      tecnico: orden.tecnico,
+    };
+
+    const pdfBuffer = await generarPdfOrdenServicio(datosPdf);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="orden-${orden.folio}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Envía (o reenvía) el recordatorio de WhatsApp de una orden
+app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
+  try {
+    const { data: orden, error } = await supabase
+      .from('ordenes_servicio')
+      .select('*, clientes_isp(nombre, telefono)')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Orden no encontrada');
+    if (!orden.clientes_isp || !orden.clientes_isp.telefono) {
+      throw new Error('El cliente no tiene teléfono registrado');
+    }
+
+    const fechaTexto = new Date(orden.fecha_cita + 'T00:00:00').toLocaleDateString('es-MX', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric',
+    });
+
+    const mensaje =
+      `Hola ${orden.clientes_isp.nombre} 👋, te escribimos de VillaNet MX para recordarte tu cita de ${orden.tipo_servicio} ` +
+      `programada para el ${fechaTexto} a las ${orden.hora_cita}. Folio: ${orden.folio}. ` +
+      `Si necesitas reprogramar, contáctanos.`;
+
+    await whatsappBot.enviarWhatsApp(orden.clientes_isp.telefono, mensaje);
+
+    await supabase.from('ordenes_servicio').update({ recordatorio_enviado: true }).eq('id', req.params.id);
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---------- Webhook de WhatsApp (bot de autoservicio para clientes) ----------
 const whatsappBot = require('./whatsappBotService');
 const VERIFY_TOKEN = process.env.VILLANET_WHATSAPP_VERIFY_TOKEN;
