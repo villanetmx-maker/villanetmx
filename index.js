@@ -121,7 +121,7 @@ app.get('/api/clientes/:id', async (req, res) => {
 });
 
 app.post('/api/clientes', async (req, res) => {
-  const { nombre, telefono, direccion, plan_id, dia_corte, password } = req.body;
+  const { nombre, telefono, direccion, plan_id, dia_corte, password, metodo_cobro } = req.body;
   if (!nombre || !plan_id || !password) {
     return res.status(400).json({ error: 'nombre, plan_id y password son requeridos' });
   }
@@ -166,6 +166,7 @@ app.post('/api/clientes', async (req, res) => {
         numero_cuenta: numeroCuenta,
         dia_corte: dia_corte || 30,
         estado: 'activo',
+        metodo_cobro: metodo_cobro || 'manual',
       })
       .select()
       .single();
@@ -298,7 +299,59 @@ app.post('/api/pagos', async (req, res) => {
   }
 });
 
-// ---------- Cobro automatico con Openpay (tarjeta guardada) ----------
+// ---------- Cobro automatico con Openpay: tarjeta guardada y SPEI ----------
+
+// Cambia el metodo de cobro de un cliente. Para 'spei' es suficiente con esto
+// (se crea el customer de Openpay si hace falta y el cron empieza a generar
+// fichas de deposito). Para 'tarjeta' este endpoint solo prepara el terreno;
+// la activacion real ocurre cuando el cliente tokeniza su tarjeta en
+// tarjeta-villanet.html y llega a POST /api/clientes/:id/tarjeta.
+app.post('/api/clientes/:id/metodo-cobro', async (req, res) => {
+  const { metodo } = req.body; // 'tarjeta' | 'spei' | 'manual'
+  if (!['tarjeta', 'spei', 'manual'].includes(metodo)) {
+    return res.status(400).json({ error: "metodo debe ser 'tarjeta', 'spei' o 'manual'" });
+  }
+
+  try {
+    const { data: cliente, error } = await supabase
+      .from('clientes_isp')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Cliente no encontrado');
+
+    let openpayCustomerId = cliente.openpay_customer_id;
+
+    if (metodo !== 'manual' && !openpayCustomerId) {
+      const partesNombre = (cliente.nombre || 'Cliente VillaNet').trim().split(' ');
+      const openpayCliente = await openpay.crearCliente({
+        nombre: partesNombre[0],
+        apellido: partesNombre.slice(1).join(' ') || 'VillaNet',
+        telefono: cliente.telefono,
+      });
+      openpayCustomerId = openpayCliente.id;
+    }
+
+    const actualizacion = {
+      metodo_cobro: metodo,
+      cobro_automatico: metodo !== 'manual',
+    };
+    if (openpayCustomerId) actualizacion.openpay_customer_id = openpayCustomerId;
+    if (metodo === 'manual') actualizacion.ultimo_error_cobro = null;
+
+    const { data: actualizado, error: updateError } = await supabase
+      .from('clientes_isp')
+      .update(actualizacion)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (updateError) throw new Error(updateError.message);
+
+    res.json({ ok: true, cliente: actualizado });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Guarda o reemplaza la tarjeta de un cliente para activar el cobro automatico.
 // El body trae token_id y device_session_id generados en el navegador con
@@ -342,6 +395,7 @@ app.post('/api/clientes/:id/tarjeta', async (req, res) => {
       .update({
         openpay_customer_id: openpayCustomerId,
         openpay_card_id: tarjeta.id,
+        metodo_cobro: 'tarjeta',
         cobro_automatico: true,
         ultimo_error_cobro: null,
       })
@@ -379,7 +433,7 @@ app.delete('/api/clientes/:id/tarjeta', async (req, res) => {
 
     await supabase
       .from('clientes_isp')
-      .update({ openpay_card_id: null, cobro_automatico: false })
+      .update({ openpay_card_id: null, metodo_cobro: 'manual', cobro_automatico: false })
       .eq('id', req.params.id);
 
     res.json({ ok: true });
@@ -431,7 +485,7 @@ app.post('/api/clientes/:id/cobrar-ahora', async (req, res) => {
         cliente_id: cliente.id,
         monto,
         mes_correspondiente: `${claveMes}-01`,
-        metodo: 'openpay',
+        metodo: 'openpay_tarjeta',
       });
       if (cliente.estado === 'suspendido') {
         await mikrotik.reactivarCliente(cliente.mikrotik_secret_name);
@@ -440,6 +494,81 @@ app.post('/api/clientes/:id/cobrar-ahora', async (req, res) => {
     }
 
     res.json({ ok: true, cargo: { id: cargo.id, status: cargo.status } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Devuelve la ficha SPEI mas reciente del cliente (para mostrarla en el panel
+// o mandarla por WhatsApp: CLABE, banco, referencia, monto y vencimiento).
+app.get('/api/clientes/:id/ficha-spei', async (req, res) => {
+  const { data, error } = await supabase
+    .from('fichas_spei_isp')
+    .select('*')
+    .eq('cliente_id', req.params.id)
+    .order('creado_en', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || { estado: 'sin_ficha' });
+});
+
+// Boton de admin "Generar ficha SPEI ahora": crea una ficha de deposito fuera
+// del calendario normal del cron (util para probar o para un cliente nuevo).
+app.post('/api/clientes/:id/generar-ficha-spei', async (req, res) => {
+  try {
+    const { data: cliente, error } = await supabase
+      .from('clientes_isp')
+      .select('*, planes_isp(precio)')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Cliente no encontrado');
+    if (!cliente.planes_isp || !cliente.planes_isp.precio) {
+      throw new Error('El cliente no tiene un plan con precio asignado');
+    }
+
+    let openpayCustomerId = cliente.openpay_customer_id;
+    if (!openpayCustomerId) {
+      const partesNombre = (cliente.nombre || 'Cliente VillaNet').trim().split(' ');
+      const openpayCliente = await openpay.crearCliente({
+        nombre: partesNombre[0],
+        apellido: partesNombre.slice(1).join(' ') || 'VillaNet',
+        telefono: cliente.telefono,
+      });
+      openpayCustomerId = openpayCliente.id;
+      await supabase.from('clientes_isp').update({ openpay_customer_id: openpayCustomerId }).eq('id', cliente.id);
+    }
+
+    const claveMes = new Date().toISOString().slice(0, 7);
+    const monto = cliente.planes_isp.precio;
+    const orderId = `${cliente.numero_cuenta || cliente.id}-${claveMes}-manual-${Date.now()}`;
+
+    const cargo = await openpay.crearCargoSPEI({
+      openpayCustomerId,
+      monto,
+      descripcion: `VillaNet MX - mensualidad ${claveMes} - ${cliente.numero_cuenta}`,
+      ordenId: orderId,
+    });
+
+    const metodoPago = cargo.payment_method || {};
+
+    const { data: ficha, error: insertError } = await supabase
+      .from('fichas_spei_isp')
+      .insert({
+        cliente_id: cliente.id,
+        openpay_charge_id: cargo.id,
+        clabe: metodoPago.clabe || null,
+        referencia: metodoPago.reference || null,
+        banco: metodoPago.bank || null,
+        monto,
+        mes_correspondiente: `${claveMes}-01`,
+        estado: 'pendiente',
+      })
+      .select()
+      .single();
+    if (insertError) throw new Error(insertError.message);
+
+    res.json({ ok: true, ficha });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -727,7 +856,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
   }
 });
 
-// ---------- Webhook de Openpay (notificaciones de cargos) ----------
+// ---------- Webhook de Openpay (notificaciones de cargos: tarjeta y SPEI) ----------
 // Openpay no firma el body del webhook, asi que nunca hay que confiar en el
 // directamente: en cuanto llega un evento se vuelve a consultar el cargo
 // real con la API para confirmarlo antes de reaccionar a el.
@@ -739,21 +868,50 @@ app.post('/webhook/openpay', async (req, res) => {
       (evento.data && evento.data.transaction && evento.data.transaction.id) ||
       evento.transaction_id;
 
-    if (transactionId) {
-      const cargoReal = await openpay.consultarCargo(transactionId);
-      console.log('[webhook openpay] verificado directo con Openpay:', cargoReal.id, cargoReal.status);
+    if (!transactionId) return res.sendStatus(200);
 
-      // El cron cronCobroISP.js ya registra el pago en cuanto el cargo con
-      // tarjeta sale "completed" de forma sincrona. Este webhook queda como
-      // respaldo para cargos que Openpay confirma de forma asincrona (por
-      // ejemplo si en el futuro se agregan pagos por SPEI u OXXO) y para
-      // quedarse con un registro de auditoria de cada notificacion recibida.
-      await supabase.from('cobros_openpay_log').insert({
-        openpay_charge_id: cargoReal.id,
-        monto: cargoReal.amount,
-        estado: 'webhook_' + cargoReal.status,
-        detalle: JSON.stringify(cargoReal).slice(0, 4000),
-      });
+    const cargoReal = await openpay.consultarCargo(transactionId);
+    console.log('[webhook openpay] verificado directo con Openpay:', cargoReal.id, cargoReal.status);
+
+    await supabase.from('cobros_openpay_log').insert({
+      openpay_charge_id: cargoReal.id,
+      monto: cargoReal.amount,
+      estado: 'webhook_' + cargoReal.status,
+      detalle: JSON.stringify(cargoReal).slice(0, 4000),
+    });
+
+    // Reconciliacion de depositos SPEI: si el cargo confirmado corresponde a
+    // una ficha generada por VillaNet, registrar el pago y reactivar solo.
+    if (cargoReal.method === 'bank_account' && cargoReal.status === 'completed') {
+      const { data: ficha } = await supabase
+        .from('fichas_spei_isp')
+        .select('*')
+        .eq('openpay_charge_id', cargoReal.id)
+        .maybeSingle();
+
+      if (ficha && ficha.estado !== 'pagada') {
+        await supabase.from('pagos_isp').insert({
+          cliente_id: ficha.cliente_id,
+          monto: ficha.monto,
+          mes_correspondiente: ficha.mes_correspondiente,
+          metodo: 'openpay_spei',
+        });
+
+        await supabase.from('fichas_spei_isp').update({ estado: 'pagada' }).eq('id', ficha.id);
+
+        const { data: cliente } = await supabase
+          .from('clientes_isp')
+          .select('mikrotik_secret_name, estado')
+          .eq('id', ficha.cliente_id)
+          .single();
+
+        if (cliente && cliente.estado === 'suspendido') {
+          await mikrotik.reactivarCliente(cliente.mikrotik_secret_name);
+          await supabase.from('clientes_isp').update({ estado: 'activo' }).eq('id', ficha.cliente_id);
+        }
+
+        console.log(`[webhook openpay] deposito SPEI confirmado y reconciliado: cliente ${ficha.cliente_id}`);
+      }
     }
 
     res.sendStatus(200);
