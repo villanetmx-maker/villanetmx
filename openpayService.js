@@ -34,6 +34,7 @@ function mensajeError(err) {
 }
 
 // Crea un "customer" en Openpay para un cliente de VillaNet (una sola vez por cliente).
+// Se usa tanto para el flujo de tarjeta guardada como para el de SPEI.
 async function crearCliente({ nombre, apellido, email, telefono }) {
   try {
     const { data } = await client.post('/customers', {
@@ -81,6 +82,32 @@ async function cobrarTarjetaGuardada({ openpayCustomerId, openpayCardId, monto, 
   }
 }
 
+// Genera una ficha de deposito SPEI (CLABE + referencia) por el monto exacto
+// de la mensualidad. El cliente transfiere manualmente -- no existe forma de
+// "jalar" dinero de una cuenta bancaria mexicana por SPEI sin tarjeta -- pero
+// en cuanto el deposito llega, Openpay lo confirma via webhook y el sistema
+// lo registra solo (ver /webhook/openpay en index.js).
+async function crearCargoSPEI({ openpayCustomerId, monto, descripcion, ordenId, fechaVencimiento }) {
+  try {
+    const body = {
+      method: 'bank_account',
+      amount: monto,
+      currency: 'MXN',
+      description: descripcion,
+      order_id: ordenId,
+    };
+    if (fechaVencimiento) {
+      body.due_date = fechaVencimiento; // ISO 8601, ej. "2026-08-05T23:59:59"
+    }
+    const { data } = await client.post(`/customers/${openpayCustomerId}/charges`, body);
+    return data;
+    // data.payment_method = { type: 'bank_account', bank: 'STP', clabe: '...', reference: '...' }
+    // data.status = 'in_progress' hasta que llega el deposito, luego 'completed'
+  } catch (err) {
+    throw new Error('Openpay (crear cargo SPEI): ' + mensajeError(err));
+  }
+}
+
 // Consulta un cargo directo con Openpay (para confirmar webhooks, que no
 // traen firma -- nunca hay que confiar en el body del webhook a ciegas).
 async function consultarCargo(chargeId) {
@@ -104,6 +131,7 @@ module.exports = {
   crearCliente,
   guardarTarjeta,
   cobrarTarjetaGuardada,
+  crearCargoSPEI,
   consultarCargo,
   eliminarTarjeta,
 };
