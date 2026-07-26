@@ -6,8 +6,10 @@ app.use(express.json());
 
 const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
+const openpay = require('./openpayService');
 
 require('./cronCorteISP');
+require('./cronCobroISP');
 
 app.get('/', (req, res) => {
   res.send('VillaNet MX backend activo');
@@ -42,7 +44,7 @@ app.put('/api/planes/:id', async (req, res) => {
       .single();
     if (fetchError) throw new Error('Plan no encontrado');
 
-    // Si cambió la velocidad, sincronizar el rate-limit real en MikroTik
+    // Si cambio la velocidad, sincronizar el rate-limit real en MikroTik
     // (esto afecta a todos los clientes que usan este profile)
     if (
       velocidad_bajada !== planActual.velocidad_bajada ||
@@ -296,7 +298,154 @@ app.post('/api/pagos', async (req, res) => {
   }
 });
 
-// ---------- Tickets de soporte técnico ----------
+// ---------- Cobro automatico con Openpay (tarjeta guardada) ----------
+
+// Guarda o reemplaza la tarjeta de un cliente para activar el cobro automatico.
+// El body trae token_id y device_session_id generados en el navegador con
+// Openpay.js (ver tarjeta-villanet.html) -- el numero de tarjeta NUNCA llega
+// a este backend.
+app.post('/api/clientes/:id/tarjeta', async (req, res) => {
+  const { token_id, device_session_id, email } = req.body;
+  if (!token_id || !device_session_id) {
+    return res.status(400).json({ error: 'token_id y device_session_id son requeridos' });
+  }
+
+  try {
+    const { data: cliente, error } = await supabase
+      .from('clientes_isp')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Cliente no encontrado');
+
+    let openpayCustomerId = cliente.openpay_customer_id;
+
+    if (!openpayCustomerId) {
+      const partesNombre = (cliente.nombre || 'Cliente VillaNet').trim().split(' ');
+      const openpayCliente = await openpay.crearCliente({
+        nombre: partesNombre[0],
+        apellido: partesNombre.slice(1).join(' ') || 'VillaNet',
+        email,
+        telefono: cliente.telefono,
+      });
+      openpayCustomerId = openpayCliente.id;
+    }
+
+    const tarjeta = await openpay.guardarTarjeta({
+      openpayCustomerId,
+      tokenId: token_id,
+      deviceSessionId: device_session_id,
+    });
+
+    await supabase
+      .from('clientes_isp')
+      .update({
+        openpay_customer_id: openpayCustomerId,
+        openpay_card_id: tarjeta.id,
+        cobro_automatico: true,
+        ultimo_error_cobro: null,
+      })
+      .eq('id', req.params.id);
+
+    res.json({
+      ok: true,
+      tarjeta: {
+        id: tarjeta.id,
+        marca: tarjeta.brand,
+        terminacion: tarjeta.card_number ? tarjeta.card_number.slice(-4) : null,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Quita la tarjeta guardada y desactiva el cobro automatico de ese cliente.
+app.delete('/api/clientes/:id/tarjeta', async (req, res) => {
+  try {
+    const { data: cliente, error } = await supabase
+      .from('clientes_isp')
+      .select('openpay_customer_id, openpay_card_id')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Cliente no encontrado');
+
+    if (cliente.openpay_customer_id && cliente.openpay_card_id) {
+      await openpay.eliminarTarjeta({
+        openpayCustomerId: cliente.openpay_customer_id,
+        openpayCardId: cliente.openpay_card_id,
+      });
+    }
+
+    await supabase
+      .from('clientes_isp')
+      .update({ openpay_card_id: null, cobro_automatico: false })
+      .eq('id', req.params.id);
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Boton de admin "Cobrar ahora": fuerza un cargo inmediato a la tarjeta
+// guardada del cliente, sin esperar al cron diario.
+app.post('/api/clientes/:id/cobrar-ahora', async (req, res) => {
+  try {
+    const { data: cliente, error } = await supabase
+      .from('clientes_isp')
+      .select('*, planes_isp(precio)')
+      .eq('id', req.params.id)
+      .single();
+    if (error) throw new Error('Cliente no encontrado');
+    if (!cliente.openpay_customer_id || !cliente.openpay_card_id) {
+      throw new Error('Este cliente no tiene tarjeta guardada en Openpay');
+    }
+    if (!cliente.planes_isp || !cliente.planes_isp.precio) {
+      throw new Error('El cliente no tiene un plan con precio asignado');
+    }
+
+    const claveMes = new Date().toISOString().slice(0, 7);
+    const monto = cliente.planes_isp.precio;
+    const orderId = `${cliente.numero_cuenta || cliente.id}-${claveMes}-manual-${Date.now()}`;
+
+    const cargo = await openpay.cobrarTarjetaGuardada({
+      openpayCustomerId: cliente.openpay_customer_id,
+      openpayCardId: cliente.openpay_card_id,
+      monto,
+      descripcion: `VillaNet MX - cobro manual - ${cliente.numero_cuenta}`,
+      ordenId: orderId,
+    });
+
+    await supabase.from('cobros_openpay_log').insert({
+      cliente_id: cliente.id,
+      openpay_charge_id: cargo.id,
+      monto,
+      mes_correspondiente: `${claveMes}-01`,
+      estado: cargo.status,
+      detalle: JSON.stringify(cargo).slice(0, 4000),
+    });
+
+    if (cargo.status === 'completed') {
+      await supabase.from('pagos_isp').insert({
+        cliente_id: cliente.id,
+        monto,
+        mes_correspondiente: `${claveMes}-01`,
+        metodo: 'openpay',
+      });
+      if (cliente.estado === 'suspendido') {
+        await mikrotik.reactivarCliente(cliente.mikrotik_secret_name);
+        await supabase.from('clientes_isp').update({ estado: 'activo' }).eq('id', cliente.id);
+      }
+    }
+
+    res.json({ ok: true, cargo: { id: cargo.id, status: cargo.status } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------- Tickets de soporte tecnico ----------
 
 app.get('/api/tickets', async (req, res) => {
   const { data, error } = await supabase
@@ -321,7 +470,7 @@ app.post('/api/tickets', async (req, res) => {
       .single();
     if (clienteError) throw new Error('Cliente no encontrado');
 
-    // Diagnóstico automático contra el MikroTik real
+    // Diagnostico automatico contra el MikroTik real
     let diagnostico = 'no_verificable';
     try {
       const estado = await mikrotik.estadoConexion(cliente.mikrotik_secret_name);
@@ -374,7 +523,7 @@ app.put('/api/tickets/:id', async (req, res) => {
   }
 });
 
-// ---------- Monitor del túnel VPN (reportado directo desde el MikroTik) ----------
+// ---------- Monitor del tunel VPN (reportado directo desde el MikroTik) ----------
 const MONITOR_TOKEN = process.env.VILLANET_MONITOR_TOKEN;
 
 app.post('/api/monitor-tunel', async (req, res) => {
@@ -387,11 +536,11 @@ app.post('/api/monitor-tunel', async (req, res) => {
   try {
     await supabase.from('monitor_tunel_log').insert({ estado, detalle });
 
-    // Si el túnel tuvo que repararse, aquí es donde en el futuro se
+    // Si el tunel tuvo que repararse, aqui es donde en el futuro se
     // dispara el aviso de WhatsApp a Alfredo (whatsappBot.enviarWhatsApp),
-    // en cuanto el número de VillaNet esté activo.
+    // en cuanto el numero de VillaNet este activo.
     // if (estado === 'reparado') {
-    //   await whatsappBot.enviarWhatsApp('<telefono_admin>', `Alerta VillaNet: el túnel se cayó y se reparó solo. Detalle: ${detalle}`);
+    //   await whatsappBot.enviarWhatsApp('<telefono_admin>', `Alerta VillaNet: el tunel se cayo y se reparo solo. Detalle: ${detalle}`);
     // }
 
     res.json({ ok: true });
@@ -411,7 +560,7 @@ app.get('/api/monitor-tunel/ultimo', async (req, res) => {
   res.json(data || { estado: 'sin_datos' });
 });
 
-// ---------- Órdenes de servicio (visitas técnicas) ----------
+// ---------- Ordenes de servicio (visitas tecnicas) ----------
 const { generarPdfOrdenServicio } = require('./ordenServicioPdf');
 
 app.get('/api/ordenes', async (req, res) => {
@@ -506,7 +655,7 @@ app.get('/api/ordenes/:id/pdf', async (req, res) => {
   }
 });
 
-// Envía (o reenvía) el recordatorio de WhatsApp de una orden
+// Envia (o reenvia) el recordatorio de WhatsApp de una orden
 app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
   try {
     const { data: orden, error } = await supabase
@@ -516,7 +665,7 @@ app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
       .single();
     if (error) throw new Error('Orden no encontrada');
     if (!orden.clientes_isp || !orden.clientes_isp.telefono) {
-      throw new Error('El cliente no tiene teléfono registrado');
+      throw new Error('El cliente no tiene telefono registrado');
     }
 
     const fechaTexto = new Date(orden.fecha_cita + 'T00:00:00').toLocaleDateString('es-MX', {
@@ -526,9 +675,9 @@ app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
     });
 
     const mensaje =
-      `Hola ${orden.clientes_isp.nombre} 👋, te escribimos de VillaNet MX para recordarte tu cita de ${orden.tipo_servicio} ` +
+      `Hola ${orden.clientes_isp.nombre} , te escribimos de VillaNet MX para recordarte tu cita de ${orden.tipo_servicio} ` +
       `programada para el ${fechaTexto} a las ${orden.hora_cita}. Folio: ${orden.folio}. ` +
-      `Si necesitas reprogramar, contáctanos.`;
+      `Si necesitas reprogramar, contactanos.`;
 
     await whatsappBot.enviarWhatsApp(orden.clientes_isp.telefono, mensaje);
 
@@ -544,7 +693,7 @@ app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
 const whatsappBot = require('./whatsappBotService');
 const VERIFY_TOKEN = process.env.VILLANET_WHATSAPP_VERIFY_TOKEN;
 
-// Verificación inicial que pide Meta al configurar el webhook
+// Verificacion inicial que pide Meta al configurar el webhook
 app.get('/webhook/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -557,7 +706,7 @@ app.get('/webhook/whatsapp', (req, res) => {
   }
 });
 
-// Recepción de mensajes reales
+// Recepcion de mensajes reales
 app.post('/webhook/whatsapp', async (req, res) => {
   try {
     const entry = req.body.entry && req.body.entry[0];
@@ -569,13 +718,48 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const telefono = mensaje.from;
       const texto = mensaje.text.body;
       await whatsappBot.manejarMensajeEntrante(telefono, texto);
-      console.log(`Mensaje de WhatsApp procesado correctamente - de: ${telefono}`);
     }
 
     res.sendStatus(200);
   } catch (err) {
     console.error('Error en webhook de WhatsApp:', err.message);
     res.sendStatus(200); // siempre 200 para que Meta no reintente en bucle
+  }
+});
+
+// ---------- Webhook de Openpay (notificaciones de cargos) ----------
+// Openpay no firma el body del webhook, asi que nunca hay que confiar en el
+// directamente: en cuanto llega un evento se vuelve a consultar el cargo
+// real con la API para confirmarlo antes de reaccionar a el.
+app.post('/webhook/openpay', async (req, res) => {
+  try {
+    const evento = req.body || {};
+    const transactionId =
+      (evento.transaction && evento.transaction.id) ||
+      (evento.data && evento.data.transaction && evento.data.transaction.id) ||
+      evento.transaction_id;
+
+    if (transactionId) {
+      const cargoReal = await openpay.consultarCargo(transactionId);
+      console.log('[webhook openpay] verificado directo con Openpay:', cargoReal.id, cargoReal.status);
+
+      // El cron cronCobroISP.js ya registra el pago en cuanto el cargo con
+      // tarjeta sale "completed" de forma sincrona. Este webhook queda como
+      // respaldo para cargos que Openpay confirma de forma asincrona (por
+      // ejemplo si en el futuro se agregan pagos por SPEI u OXXO) y para
+      // quedarse con un registro de auditoria de cada notificacion recibida.
+      await supabase.from('cobros_openpay_log').insert({
+        openpay_charge_id: cargoReal.id,
+        monto: cargoReal.amount,
+        estado: 'webhook_' + cargoReal.status,
+        detalle: JSON.stringify(cargoReal).slice(0, 4000),
+      });
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('[webhook openpay] error:', err.message);
+    res.sendStatus(200); // responder 200 para que Openpay no reintente en bucle
   }
 });
 
@@ -600,12 +784,11 @@ app.get('/api/resumen', async (req, res) => {
 
     const ingresosMes = (pagosMes || []).reduce((sum, p) => sum + parseFloat(p.monto), 0);
 
-    // Calcular cuántos clientes (no dados de baja) tienen algún mes pendiente
+    // Calcular cuantos clientes (no dados de baja) tienen algun mes pendiente
     const { data: todosPagos } = await supabase.from('pagos_isp').select('cliente_id, mes_correspondiente');
 
     let clientesConAdeudo = 0;
     const hoy = new Date();
-    const claveMesActual = hoy.toISOString().slice(0, 7);
 
     for (const c of clientes.filter((c) => c.estado !== 'baja')) {
       const mesesPagados = new Set(
