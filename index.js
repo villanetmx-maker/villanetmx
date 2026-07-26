@@ -569,6 +569,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const telefono = mensaje.from;
       const texto = mensaje.text.body;
       await whatsappBot.manejarMensajeEntrante(telefono, texto);
+      console.log(`Mensaje de WhatsApp procesado correctamente - de: ${telefono}`);
     }
 
     res.sendStatus(200);
