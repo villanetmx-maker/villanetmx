@@ -11,6 +11,7 @@ const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
 
 const WHATSAPP_TOKEN = process.env.VILLANET_WHATSAPP_TOKEN;
+const NUMERO_SOPORTE = process.env.VILLANET_ADMIN_WHATSAPP_NUMBER || '5215546633899';
 const PHONE_NUMBER_ID = process.env.VILLANET_WHATSAPP_PHONE_NUMBER_ID;
 
 // ---------- Enviar mensaje de WhatsApp ----------
@@ -177,6 +178,10 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       diagnostico_automatico: diagnostico,
       estado: 'abierto',
     });
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `🔧 Nuevo reporte de falla\nCliente: ${cliente.nombre} (${cliente.numero_cuenta})\nTel: ${telefonoOrigen}\nDescripción: ${mensaje}\nDiagnóstico: ${diagnostico}`
+      );
 
     let respuesta = '✅ Recibimos tu reporte, en breve un técnico lo revisará.';
     if (diagnostico === 'suspendido_por_falta_de_pago') {
@@ -195,6 +200,10 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       diagnostico_automatico: 'pago_reportado_por_cliente_pendiente_de_verificar',
       estado: 'abierto',
     });
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `💰 Aviso de pago recibido\nCliente: ${cliente.nombre} (${cliente.numero_cuenta})\nTel: ${telefonoOrigen}\nDetalle: ${mensaje}`
+      );
     await enviarWhatsApp(
       telefonoOrigen,
       '✅ Gracias, registramos tu aviso de pago. Un administrador lo verificará y reactivará tu servicio si corresponde.'
