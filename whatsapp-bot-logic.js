@@ -12,8 +12,8 @@
  *     (por ejemplo en `lib/supabase.js`), con la service_role key.
  *   - Existe una tabla `clientes_isp` con al menos: id, nombre, telefono,
  *     saldo, estatus (activo/suspendido/moroso), plan.
- *   - La tabla `whatsapp_sesiones` ya fue creada (ver
- *     actualizacion-whatsapp-bot-25jul2026.md).
+ *   - Las tablas `whatsapp_sesiones` y `reportes_falla` ya fueron creadas
+ *     en Supabase (ver actualizacion-whatsapp-bot-25jul2026.md).
  *
  * Variables de entorno usadas (ya configuradas en Render):
  *   - VILLANET_WHATSAPP_TOKEN
@@ -86,7 +86,6 @@ async function actualizarSesion(supabase, telefono, cambios) {
 }
 
 async function buscarClientePorTelefono(supabase, telefono) {
-  // Ajustar el formato de teléfono según cómo esté guardado en clientes_isp
   const { data, error } = await supabase
     .from("clientes_isp")
     .select("*")
@@ -142,14 +141,19 @@ async function procesarMensajeEntrante(supabase, telefono, textoRecibido) {
     }
 
     case "reportar_falla": {
-      // Guardamos la descripción de la falla en el contexto de la sesión.
       await actualizarSesion(supabase, telefono, {
         paso_actual: "falla_confirmada",
         contexto: { ...sesion.contexto, descripcion_falla: texto },
       });
 
-      // TODO: aquí se debería insertar el reporte en una tabla de tickets/fallas,
-      // por ejemplo `reportes_falla (cliente_id, telefono, descripcion, estatus, creado_en)`.
+      const clienteReportante = await buscarClientePorTelefono(supabase, telefono);
+      const { error: errReporte } = await supabase.from("reportes_falla").insert({
+        telefono,
+        cliente_id: clienteReportante?.id ?? null,
+        descripcion: texto,
+        estatus: "pendiente",
+      });
+      if (errReporte) console.error("Error al insertar reporte de falla:", errReporte);
 
       await enviarMensajeWhatsApp(
         telefono,
@@ -175,13 +179,11 @@ async function procesarMensajeEntrante(supabase, telefono, textoRecibido) {
     }
 
     default: {
-      // Cualquier estado desconocido o comando "menu" regresa al inicio.
       await actualizarSesion(supabase, telefono, { paso_actual: "menu_inicial" });
       await enviarMensajeWhatsApp(telefono, MENU_PRINCIPAL);
     }
   }
 
-  // Comando global: escribir "menu" reinicia la conversación desde cualquier estado.
   if (texto.toLowerCase() === "menu") {
     await actualizarSesion(supabase, telefono, { paso_actual: "menu_inicial" });
     await enviarMensajeWhatsApp(telefono, MENU_PRINCIPAL);
@@ -217,11 +219,6 @@ async function manejarConsultaSaldo(supabase, telefono) {
 // ---------------------------------------------------------------------
 // Handler de webhook (POST /webhook/whatsapp)
 // ---------------------------------------------------------------------
-// Integrar así en el router existente, por ejemplo:
-//
-//   const { manejarWebhookWhatsApp } = require("./whatsapp-bot-logic");
-//   app.post("/webhook/whatsapp", (req, res) => manejarWebhookWhatsApp(req, res, supabase));
-//
 async function manejarWebhookWhatsApp(req, res, supabase) {
   try {
     const entry = req.body?.entry?.[0];
@@ -229,11 +226,10 @@ async function manejarWebhookWhatsApp(req, res, supabase) {
     const mensaje = cambio?.messages?.[0];
 
     if (!mensaje) {
-      // Puede ser un evento de "status" (entregado/leído), no un mensaje nuevo.
       return res.sendStatus(200);
     }
 
-    const telefono = mensaje.from; // viene en formato internacional sin '+'
+    const telefono = mensaje.from;
     const texto = mensaje.text?.body || "";
 
     await procesarMensajeEntrante(supabase, telefono, texto);
@@ -241,7 +237,6 @@ async function manejarWebhookWhatsApp(req, res, supabase) {
     res.sendStatus(200);
   } catch (err) {
     console.error("Error procesando webhook de WhatsApp:", err);
-    // Responder 200 igual para que Meta no reintente indefinidamente.
     res.sendStatus(200);
   }
 }
