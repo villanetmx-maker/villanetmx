@@ -24,19 +24,28 @@ const PHONE_NUMBER_ID = process.env.VILLANET_WHATSAPP_PHONE_NUMBER_ID;
 // ---------- Enviar mensaje de WhatsApp ----------
 async function enviarWhatsApp(telefono, texto) {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
-  await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to: telefono,
-      type: 'text',
-      text: { body: texto },
-    }),
-  });
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: telefono,
+        type: 'text',
+        text: { body: texto },
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      console.error(`[whatsapp] ERROR al enviar a ${telefono}:`, JSON.stringify(data));
+    }
+    return data;
+  } catch (err) {
+    console.error(`[whatsapp] EXCEPCION al enviar a ${telefono}:`, err.message);
+  }
 }
 
 // ---------- Normalizar telefono para comparar contra la base ----------
