@@ -8,13 +8,44 @@
  * Variables de entorno necesarias:
  *   VILLANET_SUPABASE_URL, VILLANET_SUPABASE_SERVICE_KEY
  *   VILLANET_MIKROTIK_HOST, VILLANET_MIKROTIK_USER, VILLANET_MIKROTIK_PASSWORD (usados en mikrotikService.js)
- *   WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID (reutilizar los que ya usas en La Pape)
+ *   VILLANET_WHATSAPP_TOKEN, VILLANET_WHATSAPP_PHONE_NUMBER_ID (usados en whatsappBotService.js)
+ *
+ * Recordatorio automatico de pago (antes del corte):
+ *   WHATSAPP_TEMPLATE_RECORDATORIO_PAGO -> nombre del message template de Meta
+ *     (aun no aprobado; mientras no este configurada esta variable, el
+ *     recordatorio se omite en silencio sin afectar la suspension/reactivacion).
+ *   VILLANET_DIAS_AVISO_PAGO -> dias antes del dia_corte del cliente en que se
+ *     manda el recordatorio (default: 5).
  */
 
 const cron = require('node-cron');
 const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
-// const { enviarWhatsApp } = require('./whatsappService'); // reutilizar el que ya tienes en La Pape
+const whatsappBot = require('./whatsappBotService');
+
+const WHATSAPP_TEMPLATE_RECORDATORIO_PAGO = process.env.WHATSAPP_TEMPLATE_RECORDATORIO_PAGO;
+const DIAS_AVISO_PAGO = parseInt(process.env.VILLANET_DIAS_AVISO_PAGO || '5', 10);
+
+// Manda el recordatorio de pago (message template) si el cliente esta a
+// exactamente DIAS_AVISO_PAGO dias de su dia_corte y aun no paga el mes.
+async function enviarRecordatorioPagoSiAplica(cliente, yaPago) {
+  if (yaPago || cliente.estado !== 'activo' || !cliente.telefono) return;
+  if (!WHATSAPP_TEMPLATE_RECORDATORIO_PAGO) return; // template aun no aprobado en Meta
+
+  const diasParaCorte = cliente.dia_corte - new Date().getDate();
+  if (diasParaCorte !== DIAS_AVISO_PAGO) return;
+
+  const monto = cliente.planes_isp ? parseFloat(cliente.planes_isp.precio) : 0;
+  try {
+    await whatsappBot.enviarWhatsAppTemplate(cliente.telefono, WHATSAPP_TEMPLATE_RECORDATORIO_PAGO, [
+      cliente.nombre,
+      `$${monto.toFixed(2)} MXN`,
+    ]);
+    console.log(`Recordatorio de pago enviado a ${cliente.nombre} (corte en ${DIAS_AVISO_PAGO} dias)`);
+  } catch (err) {
+    console.error(`Error enviando recordatorio de pago a ${cliente.nombre}:`, err.message);
+  }
+}
 
 async function revisarPagosYActualizarServicio() {
   console.log(`[${new Date().toISOString()}] Iniciando revisión de pagos ISP...`);
@@ -22,7 +53,7 @@ async function revisarPagosYActualizarServicio() {
   // Trae todos los clientes activos o suspendidos (no de baja)
   const { data: clientes, error } = await supabase
     .from('clientes_isp')
-    .select('*, planes_isp(nombre)')
+    .select('*, planes_isp(nombre, precio)')
     .neq('estado', 'baja');
 
   if (error) {
@@ -45,6 +76,8 @@ async function revisarPagosYActualizarServicio() {
 
     const yaPago = !!pago;
     const hoyEsDiaDeCorte = new Date().getDate() >= cliente.dia_corte;
+
+    await enviarRecordatorioPagoSiAplica(cliente, yaPago);
 
     try {
       if (!yaPago && hoyEsDiaDeCorte && cliente.estado === 'activo') {

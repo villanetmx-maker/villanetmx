@@ -13,6 +13,11 @@
  *   RESP <numero_cuenta> texto  -> responde a un cliente en modo "con_asesor"
  *   FIN <numero_cuenta>         -> termina la atencion personalizada
  *   AYUDA                       -> muestra esta lista de comandos
+ *
+ * Recordatorios automaticos de pago: ver cronCorteISP.js, que manda un
+ * WhatsApp con message template (WHATSAPP_TEMPLATE_RECORDATORIO_PAGO) unos
+ * dias antes del corte, reutilizando enviarWhatsAppTemplate() de este mismo
+ * archivo.
  */
 const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
@@ -45,6 +50,45 @@ async function enviarWhatsApp(telefono, texto) {
     return data;
   } catch (err) {
     console.error(`[whatsapp] EXCEPCION al enviar a ${telefono}:`, err.message);
+  }
+}
+
+// ---------- Enviar mensaje de WhatsApp con message template ----------
+// Usar para mensajes que la empresa inicia (no son respuesta a algo que
+// escribio el cliente en las ultimas 24h), como los recordatorios de pago.
+// Meta exige un template previamente aprobado para este tipo de envio.
+async function enviarWhatsAppTemplate(telefono, nombreTemplate, parametrosTexto = []) {
+  const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: telefono,
+    type: 'template',
+    template: {
+      name: nombreTemplate,
+      language: { code: 'es_MX' },
+    },
+  };
+  if (parametrosTexto.length > 0) {
+    payload.template.components = [
+      { type: 'body', parameters: parametrosTexto.map((texto) => ({ type: 'text', text: String(texto) })) },
+    ];
+  }
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      console.error(`[whatsapp] ERROR al enviar template "${nombreTemplate}" a ${telefono}:`, JSON.stringify(data));
+    }
+    return data;
+  } catch (err) {
+    console.error(`[whatsapp] EXCEPCION al enviar template "${nombreTemplate}" a ${telefono}:`, err.message);
   }
 }
 
@@ -105,8 +149,29 @@ function textoMenu(nombre) {
 5️⃣ Avisar que ya pagué
 6️⃣ Mi próxima cita de servicio
 7️⃣ Hablar con un asesor
+8️⃣ Preguntas frecuentes
 Responde solo con el número (o escribe "menu" en cualquier momento para volver aquí).`;
 }
+
+// ---------- Preguntas frecuentes (texto estatico) ----------
+const TEXTO_FAQ = `❓ Preguntas frecuentes
+
+📶 ¿Qué hago si no tengo internet?
+Escribe "2" en el menú para reportar la falla y un técnico lo revisará.
+
+💳 ¿Cómo puedo pagar?
+Transferencia SPEI o tarjeta. Escribe "4" para ver tu saldo y "5" para avisar que ya pagaste.
+
+📅 ¿Cuándo se corta el servicio si no pago?
+El servicio se suspende automáticamente el día de corte de tu plan si el mes no está pagado, y se reactiva solo al confirmar tu pago.
+
+🛠️ ¿Cuánto tarda una visita técnica?
+Depende de la disponibilidad del técnico; escribe "6" para ver si ya tienes una cita agendada.
+
+📞 ¿Cómo hablo con una persona?
+Escribe "7" para pedir que un asesor te atienda directamente por aquí.
+
+Escribe "menu" para volver a las opciones.`;
 
 // ---------- Calcular adeudo detallado (misma logica que el panel) ----------
 async function calcularAdeudoDetallado(cliente) {
@@ -467,6 +532,10 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       );
       return;
 
+    case '8':
+      await enviarWhatsApp(telefonoOrigen, TEXTO_FAQ);
+      break;
+
     default:
       await enviarWhatsApp(telefonoOrigen, textoMenu(cliente.nombre));
   }
@@ -474,4 +543,4 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
   await guardarSesion(telefonoOrigen, cliente.id, 'menu');
 }
 
-module.exports = { manejarMensajeEntrante, enviarWhatsApp };
+module.exports = { manejarMensajeEntrante, enviarWhatsApp, enviarWhatsAppTemplate };
