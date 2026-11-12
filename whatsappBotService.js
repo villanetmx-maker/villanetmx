@@ -361,7 +361,11 @@ async function manejarComandoAdmin(texto) {
       .eq('tipo', tipo)
       .eq('canal', 'whatsapp')
       .eq('estado', 'disponible');
-    await enviarWhatsApp(NUMERO_SOPORTE, `✅ Enviada ${codigo} (${NOMBRE_FICHA[tipo]}) a ${tel}. Quedan ${count} de ${NOMBRE_FICHA[tipo]}.`);
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `✅ Enviada ${codigo} (${NOMBRE_FICHA[tipo]}) a ${tel}. Quedan ${count} de ${NOMBRE_FICHA[tipo]}.` +
+        (count <= 5 ? `\n⚠️ Ya quedan pocas. Pide un lote nuevo.` : '')
+    );
     return;
   }
 

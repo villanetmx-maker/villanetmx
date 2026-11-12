@@ -138,10 +138,12 @@ module.exports = function registrarHotspot(app, supabase) {
       if (!codigo) {
         await supabase.from('hotspot_ventas').update({ estado: 'sin_fichas', receipt_no: cr.receipt_no || null }).eq('id', venta.id);
         console.error(`[hotspot] PAGADA SIN FICHA DISPONIBLE venta ${venta.id} (${venta.tipo})`);
+        await avisarAdmin(`🚨 Un cliente PAGÓ con tarjeta ${(PLANES[venta.tipo] || {}).nombre || venta.tipo} ($${venta.monto}) y ya NO hay fichas web. Mándale una a mano (recibo Clip ${cr.receipt_no || '-'}) y pide un lote nuevo.`);
         return { ...venta, estado: 'sin_fichas' };
       }
       const cambios = { estado: 'pagada', codigo, receipt_no: cr.receipt_no || null, pagada_at: new Date().toISOString() };
       await supabase.from('hotspot_ventas').update(cambios).eq('id', venta.id);
+      await revisarExistencia(venta.tipo);
       return { ...venta, ...cambios };
     }
 
@@ -151,6 +153,31 @@ module.exports = function registrarHotspot(app, supabase) {
       return { ...venta, estado };
     }
     return venta; // sigue pendiente
+  }
+
+  // Aviso por WhatsApp al administrador (se carga aqui para evitar require circular).
+  async function avisarAdmin(texto) {
+    try {
+      const wa = require('./whatsappBotService');
+      const admin = process.env.VILLANET_ADMIN_WHATSAPP_NUMBER || '5215546633899';
+      await wa.enviarWhatsApp(admin, texto);
+    } catch (err) {
+      console.error('[hotspot] no se pudo avisar al admin:', err.message);
+    }
+  }
+
+  // Despues de cada venta con tarjeta: si quedan pocas fichas de ese tipo, avisa.
+  async function revisarExistencia(tipo) {
+    const { count } = await supabase
+      .from('hotspot_fichas')
+      .select('codigo', { count: 'exact', head: true })
+      .eq('tipo', tipo)
+      .eq('canal', 'web')
+      .eq('estado', 'disponible');
+    if ([10, 5, 2, 1, 0].includes(count)) {
+      const plan = (PLANES[tipo] || {}).nombre || tipo;
+      await avisarAdmin(`⚠️ Quedan ${count} fichas de ${plan} para venta con tarjeta. Pide un lote nuevo.`);
+    }
   }
 
   // Toma una ficha disponible del tipo comprado sin que dos ventas agarren la misma.
