@@ -13,9 +13,9 @@
 const clip = require('./clipService');
 
 const PLANES = {
-  'ficha-1h': { nombre: '1 hora', monto: 5 },
-  'ficha-1dia': { nombre: '1 día', monto: 15 },
-  'ficha-1semana': { nombre: '1 semana', monto: 60 },
+  'ficha-1h': { nombre: '1 hora', monto: 15 },
+  'ficha-1dia': { nombre: '1 día', monto: 20 },
+  'ficha-1semana': { nombre: '1 semana', monto: 150 },
 };
 
 const BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://villanet-backend-xoc2.onrender.com').replace(/\/$/, '');
@@ -244,8 +244,9 @@ async function revisar(){
     const r=await fetch('/api/hotspot/venta/'+ref); const d=await r.json();
     if(d.estado==='pagada'&&d.codigo){
       c.innerHTML='<h1>¡Listo! Tu ficha de '+d.plan+'</h1><div class="codigo">'+d.codigo+'</div>'+
-      '<p class="paso"><b>1.</b> Toma captura o anota tu código.</p>'+
+      '<p class="paso"><b>1.</b> Toca <b>Guardar mi código en WhatsApp</b> para tenerlo siempre en tu chat (o toma captura).</p>'+
       '<p class="paso"><b>2.</b> Toca <b>Usar mi ficha</b> y escribe el código en la página de VillaNet WiFi.</p>'+
+      '<a class="btn btn-wa" href="https://wa.me/525668574395?text='+encodeURIComponent('Mi ficha WiFi VillaNet ('+d.plan+'): '+d.codigo)+'">Guardar mi código en WhatsApp</a>'+
       '<a class="btn" href="http://192.168.60.1/logout">Usar mi ficha</a>'+
       '<p class="nota">Si no te sale la página de VillaNet, abre <b>http://192.168.60.1</b> en tu navegador.</p>';
       return;

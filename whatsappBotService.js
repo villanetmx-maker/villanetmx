@@ -317,6 +317,19 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
     return;
   }
 
+  // Cliente del hotspot que guarda su ficha comprada en linea (boton
+  // "Guardar mi codigo en WhatsApp" de /hotspot/resultado): se le confirma
+  // y se le explica como usarla, sin pasar por el flujo de clientes fijos.
+  if (/^mi ficha wifi villanet/i.test(mensaje)) {
+    await enviarWhatsApp(
+      telefonoOrigen,
+      '✅ ¡Listo! Tu código quedó guardado en este chat.\n\n' +
+        'Para conectarte: en la red WiFi de VillaNet abre http://192.168.60.1 y escribe tu código.\n' +
+        'Si tienes algún problema, respóndenos aquí mismo.'
+    );
+    return;
+  }
+
   let sesion = await obtenerSesion(telefonoOrigen);
   let cliente = null;
   if (sesion && sesion.cliente_id) {
