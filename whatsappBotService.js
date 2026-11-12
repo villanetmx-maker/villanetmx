@@ -139,6 +139,18 @@ async function guardarSesion(telefono, cliente_id, estado) {
     .upsert({ telefono, cliente_id, estado, actualizado_en: new Date().toISOString() });
 }
 
+// ---------- Cambiar el estado de TODAS las sesiones de un cliente ----------
+// El telefono guardado en clientes_isp puede venir en otro formato que el que
+// manda WhatsApp (ej. 55... vs 521 55...), asi que se actualiza por cliente_id
+// para que RESP/FIN afecten la sesion real del cliente.
+async function cambiarSesionesCliente(cliente, estado) {
+  await supabase
+    .from('whatsapp_sesiones')
+    .update({ estado, actualizado_en: new Date().toISOString() })
+    .eq('cliente_id', cliente.id);
+  await guardarSesion(cliente.telefono, cliente.id, estado);
+}
+
 // ---------- Menu principal ----------
 function textoMenu(nombre) {
   return `Hola ${nombre} 👋, soy el asistente de VillaNet MX. ¿En qué te ayudo?
@@ -272,7 +284,7 @@ async function manejarComandoAdmin(texto) {
       return;
     }
     await enviarWhatsApp(cliente.telefono, textoRespuesta);
-    await guardarSesion(cliente.telefono, cliente.id, 'con_asesor');
+    await cambiarSesionesCliente(cliente, 'con_asesor');
     await enviarWhatsApp(NUMERO_SOPORTE, `↪️ Enviado a ${cliente.nombre} (${cliente.numero_cuenta}).`);
     return;
   }
@@ -288,7 +300,7 @@ async function manejarComandoAdmin(texto) {
       await enviarWhatsApp(NUMERO_SOPORTE, `No encontré un cliente con cuenta ${cuenta}.`);
       return;
     }
-    await guardarSesion(cliente.telefono, cliente.id, 'menu');
+    await cambiarSesionesCliente(cliente, 'menu');
     await enviarWhatsApp(cliente.telefono, 'Gracias por contactarnos 🙌. Si necesitas algo más, escribe "menu".');
     await enviarWhatsApp(NUMERO_SOPORTE, `🔚 Atención con ${cliente.nombre} (${cliente.numero_cuenta}) finalizada.`);
     return;
