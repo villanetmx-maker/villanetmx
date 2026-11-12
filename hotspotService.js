@@ -41,6 +41,7 @@ module.exports = function registrarHotspot(app, supabase) {
         .from('hotspot_fichas')
         .select('codigo', { count: 'exact', head: true })
         .eq('tipo', tipo)
+        .eq('canal', 'web')
         .eq('estado', 'disponible');
       if (!count) return res.status(409).json({ error: 'Por ahora no hay fichas de este tipo. Escríbenos por WhatsApp.' });
 
@@ -159,6 +160,7 @@ module.exports = function registrarHotspot(app, supabase) {
         .from('hotspot_fichas')
         .select('codigo')
         .eq('tipo', venta.tipo)
+        .eq('canal', 'web')
         .eq('estado', 'disponible')
         .order('codigo')
         .limit(1)
@@ -175,6 +177,7 @@ module.exports = function registrarHotspot(app, supabase) {
           .from('hotspot_fichas')
           .select('codigo', { count: 'exact', head: true })
           .eq('tipo', venta.tipo)
+          .eq('canal', 'web')
           .eq('estado', 'disponible');
         if (count !== null && count < 5) console.warn(`[hotspot] Quedan ${count} fichas de ${venta.tipo}`);
         return tomada[0].codigo;

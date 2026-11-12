@@ -294,10 +294,84 @@ async function manejarComandoAdmin(texto) {
     return;
   }
 
+  // ---------- Fichas WiFi del hotspot (venta por transferencia) ----------
+  // FICHA <HORA|DIA|SEMANA> <telefono>  -> envia una ficha disponible al cliente
+  // FICHAS                              -> cuantas fichas quedan de cada tipo
+  const TIPOS_FICHA = { HORA: 'ficha-1h', DIA: 'ficha-1dia', SEMANA: 'ficha-1semana' };
+  const NOMBRE_FICHA = { 'ficha-1h': '1 hora', 'ficha-1dia': '1 día', 'ficha-1semana': '1 semana' };
+
+  if (comando === 'FICHA') {
+    const tipo = TIPOS_FICHA[(partes[1] || '').toUpperCase()];
+    let tel = (partes[2] || '').replace(/\D/g, '');
+    if (tel.length === 10) tel = '52' + tel;
+    if (!tipo || tel.length < 12) {
+      await enviarWhatsApp(NUMERO_SOPORTE, 'Uso: FICHA <HORA|DIA|SEMANA> <telefono>\nEj: FICHA DIA 5215512345678');
+      return;
+    }
+    let codigo = null;
+    for (let intento = 0; intento < 5 && !codigo; intento++) {
+      const { data: libre } = await supabase
+        .from('hotspot_fichas')
+        .select('codigo')
+        .eq('tipo', tipo)
+        .eq('canal', 'whatsapp')
+        .eq('estado', 'disponible')
+        .order('codigo')
+        .limit(1)
+        .maybeSingle();
+      if (!libre) break;
+      const { data: tomada } = await supabase
+        .from('hotspot_fichas')
+        .update({ estado: 'vendida', vendida_a: tel, vendida_at: new Date().toISOString() })
+        .eq('codigo', libre.codigo)
+        .eq('estado', 'disponible')
+        .select('codigo');
+      if (tomada && tomada.length) codigo = tomada[0].codigo;
+    }
+    if (!codigo) {
+      await enviarWhatsApp(NUMERO_SOPORTE, `⚠️ Ya no hay fichas de ${NOMBRE_FICHA[tipo]} para WhatsApp. Pide un lote nuevo.`);
+      return;
+    }
+    const r = await enviarWhatsApp(
+      tel,
+      `🛜 Tu ficha WiFi VillaNet de *${NOMBRE_FICHA[tipo]}*:\n\n*${codigo}*\n\n` +
+        'Para conectarte: en la red WiFi de VillaNet abre http://192.168.60.1 y escribe tu código. ¡Gracias por tu compra! 🙌'
+    );
+    if (r && r.error) {
+      // No se pudo entregar (p. ej. el cliente no ha escrito en 24h): se libera la ficha
+      await supabase.from('hotspot_fichas').update({ estado: 'disponible', vendida_a: null, vendida_at: null }).eq('codigo', codigo);
+      await enviarWhatsApp(NUMERO_SOPORTE, `❌ No se pudo enviar a ${tel} (${r.error.message || 'error de WhatsApp'}). La ficha sigue disponible.`);
+      return;
+    }
+    const { count } = await supabase
+      .from('hotspot_fichas')
+      .select('codigo', { count: 'exact', head: true })
+      .eq('tipo', tipo)
+      .eq('canal', 'whatsapp')
+      .eq('estado', 'disponible');
+    await enviarWhatsApp(NUMERO_SOPORTE, `✅ Enviada ${codigo} (${NOMBRE_FICHA[tipo]}) a ${tel}. Quedan ${count} de ${NOMBRE_FICHA[tipo]}.`);
+    return;
+  }
+
+  if (comando === 'FICHAS') {
+    const { data } = await supabase.from('hotspot_fichas').select('tipo, canal').eq('estado', 'disponible');
+    const cuenta = {};
+    for (const f of data || []) {
+      const k = `${f.canal}|${f.tipo}`;
+      cuenta[k] = (cuenta[k] || 0) + 1;
+    }
+    const linea = (canal) =>
+      Object.keys(NOMBRE_FICHA).map((t) => `${NOMBRE_FICHA[t]}: ${cuenta[`${canal}|${t}`] || 0}`).join(' · ');
+    await enviarWhatsApp(NUMERO_SOPORTE, `🛜 Fichas disponibles\nWhatsApp: ${linea('whatsapp')}\nTarjeta: ${linea('web')}`);
+    return;
+  }
+
   // AYUDA o cualquier otro texto sin reconocer
   await enviarWhatsApp(
     NUMERO_SOPORTE,
     `Comandos disponibles:\n` +
+      `FICHA <HORA|DIA|SEMANA> <telefono> — envía una ficha WiFi pagada por transferencia\n` +
+      `FICHAS — cuántas fichas WiFi quedan\n` +
       `RESUELTO <id_ticket> — marca un reporte como resuelto\n` +
       `RESP <cuenta> <mensaje> — responde a un cliente (ej. RESP VN-001 Ya vamos)\n` +
       `FIN <cuenta> — termina la atención personalizada con ese cliente`
@@ -340,16 +414,32 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       telefonoOrigen,
       `¡Claro! 🛜 Fichas WiFi VillaNet:\n${lista}\n\n` +
         `💳 Paga con tarjeta aquí y recibe tu código al instante:\n${BASE_URL}/hotspot/comprar\n\n` +
-        `¿Prefieres pagar en efectivo o transferencia? Responde *EFECTIVO* y en un momento te atiende un asesor.`
+        `¿Prefieres pagar por transferencia? Responde *TRANSFERENCIA*.`
     );
     await enviarWhatsApp(NUMERO_SOPORTE, `🛜 Interesado en ficha WiFi: ${telefonoOrigen}\n"${mensaje}"`);
     return;
   }
 
-  // Respuesta "EFECTIVO" a la oferta de fichas: avisar al administrador.
-  if (/^efectivo$/i.test(mensaje)) {
-    await enviarWhatsApp(telefonoOrigen, 'Perfecto, en un momento te escribe un asesor para tu ficha. 🙌');
-    await enviarWhatsApp(NUMERO_SOPORTE, `💵 ${telefonoOrigen} quiere comprar ficha WiFi en efectivo/transferencia. Escríbele a wa.me/${telefonoOrigen}`);
+  // Respuesta "TRANSFERENCIA": datos bancarios (vienen de variables de entorno
+  // en Render, para que la cuenta no quede escrita en el repositorio publico).
+  if (/^transferencia$/i.test(mensaje)) {
+    const clabe = process.env.VILLANET_CLABE;
+    const banco = process.env.VILLANET_CLABE_BANCO || '';
+    const titular = process.env.VILLANET_CLABE_TITULAR || '';
+    if (clabe) {
+      await enviarWhatsApp(
+        telefonoOrigen,
+        `🏦 Datos para tu transferencia:\nBanco: ${banco}\nCLABE: ${clabe}\nNombre: ${titular}\n\n` +
+          'Cuando la hagas, mándanos aquí la foto de tu comprobante y te enviamos tu ficha. 🙌'
+      );
+    } else {
+      await enviarWhatsApp(telefonoOrigen, 'En un momento te escribe un asesor con los datos para tu transferencia. 🙌');
+    }
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `🏦 ${telefonoOrigen} va a pagar ficha WiFi por transferencia. Revisa su comprobante en el chat.\n` +
+        `Cuando confirmes el depósito, responde con uno de estos:\nFICHA HORA ${telefonoOrigen}\nFICHA DIA ${telefonoOrigen}\nFICHA SEMANA ${telefonoOrigen}`
+    );
     return;
   }
 
