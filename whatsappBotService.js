@@ -406,7 +406,7 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
 
   // Alguien quiere comprar una ficha del hotspot (boton "Comprar por WhatsApp"
   // o mensaje libre): se le dan precios y el link de pago con tarjeta, y se
-  // avisa al administrador por si prefiere pagar en efectivo o transferencia.
+  // avisa al administrador por si prefiere pagar por transferencia.
   if (/(comprar|quiero|vend\w*|precio\w*).{0,40}ficha|ficha.{0,40}(comprar|precio)/i.test(mensaje)) {
     const { PLANES, BASE_URL } = require('./hotspotService');
     const lista = Object.values(PLANES).map((p) => `${p.nombre} $${p.monto}`).join(' · ');
