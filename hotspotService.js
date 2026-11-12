@@ -2,8 +2,8 @@
 // Venta automatica de fichas del hotspot VillaNet WiFi con Clip.
 //
 // Como funciona:
-//  1. Las fichas "web" (prefijo VW) ya existen en la MikroTik (se cargan con
-//     villanet-fichas-web.rsc) y tambien en la tabla hotspot_fichas de Supabase.
+//  1. Las fichas "web" (prefijo VX) existen en la MikroTik y en la tabla
+//     hotspot_fichas. Se reponen solas: ver /api/hotspot/router/lote.
 //  2. El cliente elige su ficha en /hotspot/comprar -> se crea una venta y un
 //     link de pago de Clip.
 //  3. Cuando Clip confirma el pago (webhook o consulta), se le asigna una ficha
@@ -28,6 +28,109 @@ module.exports = function registrarHotspot(app, supabase) {
 
   app.get('/hotspot/resultado', (req, res) => {
     res.type('html').send(paginaResultado(String(req.query.ref || '')));
+  });
+
+  // ---------- Reposicion automatica de fichas (la pide el MikroTik) ----------
+  // El hEX corre cada 10 min el script "fichas-reponer": baja de aqui un .rsc
+  // con las fichas nuevas, lo importa y luego llama a /confirmar. Las fichas
+  // nuevas quedan como 'pendiente_router' (no se venden) hasta que el router
+  // confirma que ya las tiene. Protegido con HOTSPOT_ROUTER_TOKEN (Render).
+  const ROUTER_TOKEN = process.env.HOTSPOT_ROUTER_TOKEN;
+  const MINIMO = 15; // si quedan menos de esto de un tipo/canal, se genera lote
+  const LOTE = 30;
+  const PREFIJO = { web: 'VX', whatsapp: 'VN' };
+  const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+  function tokenValido(req) {
+    return ROUTER_TOKEN && String(req.query.t || '') === ROUTER_TOKEN;
+  }
+
+  function codigoNuevo(prefijo) {
+    const bytes = require('crypto').randomBytes(4);
+    let c = prefijo;
+    for (const b of bytes) c += ALFABETO[b % ALFABETO.length];
+    return c;
+  }
+
+  app.get('/api/hotspot/router/lote', async (req, res) => {
+    if (!tokenValido(req)) return res.status(403).type('text').send('# sin permiso');
+    try {
+      for (const canal of Object.keys(PREFIJO)) {
+        for (const tipo of Object.keys(PLANES)) {
+          const { count } = await supabase
+            .from('hotspot_fichas')
+            .select('codigo', { count: 'exact', head: true })
+            .eq('tipo', tipo)
+            .eq('canal', canal)
+            .in('estado', ['disponible', 'pendiente_router']);
+          if (count < MINIMO) {
+            const filas = [];
+            for (let i = 0; i < LOTE; i++) {
+              filas.push({ codigo: codigoNuevo(PREFIJO[canal]), tipo, canal, estado: 'pendiente_router' });
+            }
+            await supabase.from('hotspot_fichas').upsert(filas, { onConflict: 'codigo', ignoreDuplicates: true });
+          }
+        }
+      }
+
+      const { data: pendientes } = await supabase
+        .from('hotspot_fichas')
+        .select('codigo, tipo, canal, creada_at')
+        .eq('estado', 'pendiente_router')
+        .order('creada_at')
+        .limit(400);
+
+      if (!pendientes || !pendientes.length) {
+        return res.type('text').send('# VillaNet: no hacen falta fichas nuevas\n');
+      }
+
+      const hasta = Math.max(...pendientes.map((f) => new Date(f.creada_at).getTime()));
+      const lineas = ['# VillaNet: lote automatico de fichas'];
+      for (const f of pendientes) {
+        if (!/^[A-Z0-9]{6}$/.test(f.codigo) || !PLANES[f.tipo]) continue;
+        const extra = f.tipo === 'ficha-1h' ? ' limit-uptime=1h' : '';
+        const coment = (f.canal === 'web' ? 'web-' : '') + f.tipo;
+        lineas.push(
+          `:if ([:len [/ip hotspot user find name="${f.codigo}"]] = 0) do={ /ip hotspot user add name="${f.codigo}" password="${f.codigo}" profile=${f.tipo}${extra} comment="${coment}" }`
+        );
+      }
+      lineas.push(
+        `/tool fetch url="${BASE_URL}/api/hotspot/router/confirmar\\?t=${ROUTER_TOKEN}&hasta=${hasta}" output=none`
+      );
+      lineas.push(`:log info "VillaNet: se cargaron ${pendientes.length} fichas nuevas"`);
+      res.type('text').send(lineas.join('\n') + '\n');
+    } catch (err) {
+      console.error('[hotspot lote]', err.message);
+      res.status(500).type('text').send('# error');
+    }
+  });
+
+  app.get('/api/hotspot/router/confirmar', async (req, res) => {
+    if (!tokenValido(req)) return res.status(403).json({ error: 'sin permiso' });
+    try {
+      const hasta = Number(req.query.hasta);
+      if (!hasta) return res.status(400).json({ error: 'falta hasta' });
+      const { data } = await supabase
+        .from('hotspot_fichas')
+        .update({ estado: 'disponible' })
+        .eq('estado', 'pendiente_router')
+        .lte('creada_at', new Date(hasta).toISOString())
+        .select('tipo, canal');
+      const n = (data || []).length;
+      if (n) {
+        const resumen = {};
+        for (const f of data) {
+          const k = `${f.canal === 'web' ? 'Tarjeta' : 'WhatsApp'} ${(PLANES[f.tipo] || {}).nombre || f.tipo}`;
+          resumen[k] = (resumen[k] || 0) + 1;
+        }
+        const txt = Object.entries(resumen).map(([k, v]) => `${k}: ${v}`).join('\n');
+        await avisarAdmin(`🛜 El router cargó ${n} fichas nuevas automáticamente:\n${txt}`);
+      }
+      res.json({ ok: true, activadas: n });
+    } catch (err) {
+      console.error('[hotspot confirmar]', err.message);
+      res.status(500).json({ error: 'error' });
+    }
   });
 
   // ---------- Crear venta + link de pago ----------
@@ -138,7 +241,7 @@ module.exports = function registrarHotspot(app, supabase) {
       if (!codigo) {
         await supabase.from('hotspot_ventas').update({ estado: 'sin_fichas', receipt_no: cr.receipt_no || null }).eq('id', venta.id);
         console.error(`[hotspot] PAGADA SIN FICHA DISPONIBLE venta ${venta.id} (${venta.tipo})`);
-        await avisarAdmin(`🚨 Un cliente PAGÓ con tarjeta ${(PLANES[venta.tipo] || {}).nombre || venta.tipo} ($${venta.monto}) y ya NO hay fichas web. Mándale una a mano (recibo Clip ${cr.receipt_no || '-'}) y pide un lote nuevo.`);
+        await avisarAdmin(`🚨 Un cliente PAGÓ con tarjeta ${(PLANES[venta.tipo] || {}).nombre || venta.tipo} ($${venta.monto}) y ya NO hay fichas web. Mándale una a mano (recibo Clip ${cr.receipt_no || '-'}) y revisa que el hEX tenga internet (repone fichas solo).`);
         return { ...venta, estado: 'sin_fichas' };
       }
       const cambios = { estado: 'pagada', codigo, receipt_no: cr.receipt_no || null, pagada_at: new Date().toISOString() };
@@ -174,9 +277,9 @@ module.exports = function registrarHotspot(app, supabase) {
       .eq('tipo', tipo)
       .eq('canal', 'web')
       .eq('estado', 'disponible');
-    if ([10, 5, 2, 1, 0].includes(count)) {
+    if ([5, 2, 0].includes(count)) {
       const plan = (PLANES[tipo] || {}).nombre || tipo;
-      await avisarAdmin(`⚠️ Quedan ${count} fichas de ${plan} para venta con tarjeta. Pide un lote nuevo.`);
+      await avisarAdmin(`⚠️ Quedan ${count} fichas de ${plan} para tarjeta y el router no ha cargado nuevas. Revisa que el hEX tenga internet.`);
     }
   }
 

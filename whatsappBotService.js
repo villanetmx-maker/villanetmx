@@ -341,7 +341,7 @@ async function manejarComandoAdmin(texto) {
       if (tomada && tomada.length) codigo = tomada[0].codigo;
     }
     if (!codigo) {
-      await enviarWhatsApp(NUMERO_SOPORTE, `⚠️ Ya no hay fichas de ${NOMBRE_FICHA[tipo]} para WhatsApp. Pide un lote nuevo.`);
+      await enviarWhatsApp(NUMERO_SOPORTE, `⚠️ Ya no hay fichas de ${NOMBRE_FICHA[tipo]} para WhatsApp. El router las repone solo cada 10 min; revisa que el hEX tenga internet.`);
       return;
     }
     const r = await enviarWhatsApp(
@@ -364,7 +364,7 @@ async function manejarComandoAdmin(texto) {
     await enviarWhatsApp(
       NUMERO_SOPORTE,
       `✅ Enviada ${codigo} (${NOMBRE_FICHA[tipo]}) a ${tel}. Quedan ${count} de ${NOMBRE_FICHA[tipo]}.` +
-        (count <= 5 ? `\n⚠️ Ya quedan pocas. Pide un lote nuevo.` : '')
+        (count <= 5 ? `\n⚠️ Quedan pocas y el router no ha cargado nuevas. Revisa que el hEX tenga internet.` : '')
     );
     return;
   }
