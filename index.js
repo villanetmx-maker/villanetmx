@@ -8,6 +8,8 @@ const mikrotik = require('./mikrotikService');
 const openpay = require('./openpayService');
 require('./cronCorteISP');
 require('./cronCobroISP');
+// Hotspot de fichas: venta automatica con Clip (ver hotspotService.js)
+require('./hotspotService')(app, supabase);
 app.get('/', (req, res) => {
   res.send('VillaNet MX backend activo');
 });
