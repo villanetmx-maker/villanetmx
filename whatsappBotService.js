@@ -434,7 +434,10 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
 
   // Respuesta "TRANSFERENCIA": datos bancarios (vienen de variables de entorno
   // en Render, para que la cuenta no quede escrita en el repositorio publico).
-  if (/^transferencia$/i.test(mensaje)) {
+  // Tolerante a errores de dedo y acentos: tranferencia, trasferencia,
+  // transferencía, "transferencia por favor", "spei", "deposito"...
+  const sinAcentos = mensaje.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  if (/^\W*(tra\w{0,3}fe\w*|transf\w*|spei|deposito)\b/.test(sinAcentos)) {
     const clabe = process.env.VILLANET_CLABE;
     const banco = process.env.VILLANET_CLABE_BANCO || '';
     const titular = process.env.VILLANET_CLABE_TITULAR || '';
