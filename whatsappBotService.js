@@ -330,6 +330,29 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
     return;
   }
 
+  // Alguien quiere comprar una ficha del hotspot (boton "Comprar por WhatsApp"
+  // o mensaje libre): se le dan precios y el link de pago con tarjeta, y se
+  // avisa al administrador por si prefiere pagar en efectivo o transferencia.
+  if (/(comprar|quiero|vend\w*|precio\w*).{0,40}ficha|ficha.{0,40}(comprar|precio)/i.test(mensaje)) {
+    const { PLANES, BASE_URL } = require('./hotspotService');
+    const lista = Object.values(PLANES).map((p) => `${p.nombre} $${p.monto}`).join(' · ');
+    await enviarWhatsApp(
+      telefonoOrigen,
+      `¡Claro! 🛜 Fichas WiFi VillaNet:\n${lista}\n\n` +
+        `💳 Paga con tarjeta aquí y recibe tu código al instante:\n${BASE_URL}/hotspot/comprar\n\n` +
+        `¿Prefieres pagar en efectivo o transferencia? Responde *EFECTIVO* y en un momento te atiende un asesor.`
+    );
+    await enviarWhatsApp(NUMERO_SOPORTE, `🛜 Interesado en ficha WiFi: ${telefonoOrigen}\n"${mensaje}"`);
+    return;
+  }
+
+  // Respuesta "EFECTIVO" a la oferta de fichas: avisar al administrador.
+  if (/^efectivo$/i.test(mensaje)) {
+    await enviarWhatsApp(telefonoOrigen, 'Perfecto, en un momento te escribe un asesor para tu ficha. 🙌');
+    await enviarWhatsApp(NUMERO_SOPORTE, `💵 ${telefonoOrigen} quiere comprar ficha WiFi en efectivo/transferencia. Escríbele a wa.me/${telefonoOrigen}`);
+    return;
+  }
+
   let sesion = await obtenerSesion(telefonoOrigen);
   let cliente = null;
   if (sesion && sesion.cliente_id) {

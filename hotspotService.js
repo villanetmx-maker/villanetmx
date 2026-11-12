@@ -260,3 +260,7 @@ async function revisar(){
 revisar();
 </script></body></html>`;
 }
+
+// Precios compartidos con el bot de WhatsApp
+module.exports.PLANES = PLANES;
+module.exports.BASE_URL = BASE_URL;
