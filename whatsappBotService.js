@@ -420,6 +420,18 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
     return;
   }
 
+  // "BAJA": deja de recibir promociones (aviso de privacidad del WiFi gratis).
+  if (/^\W*baja\W*$/i.test(mensaje)) {
+    const tel = '52' + normalizarTelefono(telefonoOrigen);
+    await supabase.from('hotspot_registros').update({ baja: true }).eq('telefono', tel);
+    await enviarWhatsApp(
+      telefonoOrigen,
+      'Listo ✅, ya no te enviaremos promociones del WiFi VillaNet.\n' +
+        'Si lo que quieres es cancelar tu internet en casa, escribe "menu" y elige 7 para hablar con un asesor.'
+    );
+    return;
+  }
+
   // Alguien quiere comprar una ficha del hotspot (boton "Comprar por WhatsApp"
   // o mensaje libre): se le dan precios y el link de pago con tarjeta, y se
   // avisa al administrador por si prefiere pagar por transferencia.

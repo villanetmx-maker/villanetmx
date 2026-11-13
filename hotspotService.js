@@ -30,6 +30,39 @@ module.exports = function registrarHotspot(app, supabase) {
     res.type('html').send(paginaResultado(String(req.query.ref || '')));
   });
 
+  // ---------- Registro de la prueba gratis (WhatsApp a cambio de 15 min) ----------
+  // login.html hace el login de prueba con dst=/hotspot/registro?tel=..&mac=..,
+  // asi que esta pagina se abre ya con internet. Guarda el numero y muestra
+  // los precios de las fichas.
+  app.get('/hotspot/registro', async (req, res) => {
+    const tel10 = String(req.query.tel || '').replace(/\D/g, '').slice(-10);
+    const mac = String(req.query.mac || '').slice(0, 32);
+    if (tel10.length === 10) {
+      try {
+        const telefono = '52' + tel10;
+        const ahora = new Date().toISOString();
+        const { data: previo } = await supabase
+          .from('hotspot_registros')
+          .select('visitas')
+          .eq('telefono', telefono)
+          .maybeSingle();
+        if (previo) {
+          await supabase
+            .from('hotspot_registros')
+            .update({ visitas: (previo.visitas || 0) + 1, ultima_at: ahora, mac })
+            .eq('telefono', telefono);
+        } else {
+          await supabase
+            .from('hotspot_registros')
+            .insert({ telefono, mac, visitas: 1, primera_at: ahora, ultima_at: ahora, acepto_privacidad: true });
+        }
+      } catch (err) {
+        console.error('[hotspot registro]', err.message);
+      }
+    }
+    res.type('html').send(paginaRegistro());
+  });
+
   // ---------- Reposicion automatica de fichas (la pide el MikroTik) ----------
   // El hEX corre cada 10 min el script "fichas-reponer": baja de aqui un .rsc
   // con las fichas nuevas, lo importa y luego llama a /confirmar. Las fichas
@@ -361,6 +394,18 @@ async function comprar(tipo, b){
   }catch(e){const el=document.getElementById('err'); el.textContent=e.message; el.style.display='block'; setTimeout(()=>location.reload(),3000);}
 }
 </script></body></html>`;
+}
+
+function paginaRegistro() {
+  const lista = Object.values(PLANES).map((p) => `<div class="plan"><span>${p.nombre}</span><b>$${p.monto}</b></div>`).join('');
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VillaNet WiFi</title><style>${ESTILOS}</style></head><body><div class="card">
+<h1>✅ ¡Listo! Tienes 15 minutos gratis</h1><p class="sub">Cuando se terminen, compra tu ficha para seguir navegando</p>
+${lista}
+<a class="btn" style="background:#1565c0;color:#fff" href="${BASE_URL}/hotspot/comprar">Comprar ficha con tarjeta</a>
+<a class="btn btn-wa" href="https://wa.me/525668574395?text=Hola%2C%20quiero%20comprar%20una%20ficha%20de%20WiFi%20VillaNet">Comprar por WhatsApp</a>
+<a class="btn" style="background:#eef3f8;color:#0b3d91" href="https://www.google.com">Empezar a navegar</a>
+</div></body></html>`;
 }
 
 function paginaResultado(ref) {
