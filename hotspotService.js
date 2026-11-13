@@ -23,6 +23,8 @@ const BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://villanet-backend-xoc2.
 module.exports = function registrarHotspot(app, supabase) {
   // Recargas Taecel (tiempo aire y servicios)
   require('./recargasService')(app, supabase);
+  // Registro de consumo de la red (lo manda el hEX cada 5 min)
+  require('./consumoService')(app, supabase);
 
   // ---------- Paginas publicas (las abre el cliente desde el hotspot) ----------
   app.get('/hotspot/comprar', (req, res) => {
