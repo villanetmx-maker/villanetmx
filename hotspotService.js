@@ -21,6 +21,9 @@ const PLANES = {
 const BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://villanet-backend-xoc2.onrender.com').replace(/\/$/, '');
 
 module.exports = function registrarHotspot(app, supabase) {
+  // Recargas Taecel (tiempo aire y servicios)
+  require('./recargasService')(app, supabase);
+
   // ---------- Paginas publicas (las abre el cliente desde el hotspot) ----------
   app.get('/hotspot/comprar', (req, res) => {
     res.type('html').send(paginaComprar());
