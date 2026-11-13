@@ -432,6 +432,17 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
     return;
   }
 
+  // Recargas y pago de servicios (Taecel) con tarjeta
+  if (/\b(recarga\w*|tiempo aire|saldo para|pago de servicio\w*|pagar (la )?luz|pagar cfe)\b/i.test(mensaje)) {
+    const { BASE_URL } = require('./hotspotService');
+    await enviarWhatsApp(
+      telefonoOrigen,
+      `📱 Recargas, paquetes y pago de servicios (Telcel, AT&T, Movistar, Bait, CFE, Telmex y más).\n\n` +
+        `Paga con tarjeta aquí y se aplica al momento:\n${BASE_URL}/recargas`
+    );
+    return;
+  }
+
   // Alguien quiere comprar una ficha del hotspot (boton "Comprar por WhatsApp"
   // o mensaje libre): se le dan precios y el link de pago con tarjeta, y se
   // avisa al administrador por si prefiere pagar por transferencia.

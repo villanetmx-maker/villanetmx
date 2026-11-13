@@ -407,6 +407,7 @@ function paginaRegistro() {
 ${lista}
 <a class="btn" style="background:#1565c0;color:#fff" href="${BASE_URL}/hotspot/comprar">Comprar ficha con tarjeta</a>
 <a class="btn btn-wa" href="https://wa.me/525668574395?text=Hola%2C%20quiero%20comprar%20una%20ficha%20de%20WiFi%20VillaNet">Comprar por WhatsApp</a>
+<a class="btn" style="background:#0b3d91;color:#fff" href="${BASE_URL}/recargas">📱 Recargas y pago de servicios</a>
 <a class="btn" style="background:#eef3f8;color:#0b3d91" href="https://www.google.com">Empezar a navegar</a>
 </div></body></html>`;
 }
