@@ -369,6 +369,36 @@ async function manejarComandoAdmin(texto) {
     return;
   }
 
+  // AVISO CUENTAS [VN-005] -> manda la plantilla con su numero de cuenta a
+  // todos los clientes activos (o solo al indicado). Plantilla en Meta:
+  // WHATSAPP_TEMPLATE_NUMERO_CLIENTE (por defecto numero_cliente_villanet).
+  if (comando === 'AVISO' && (partes[1] || '').toUpperCase() === 'CUENTAS') {
+    const plantilla = process.env.WHATSAPP_TEMPLATE_NUMERO_CLIENTE || 'numero_cliente_villanet';
+    let q = supabase.from('clientes_isp').select('numero_cuenta, nombre, telefono').eq('estado', 'activo');
+    if (partes[2]) q = q.eq('numero_cuenta', partes[2].toUpperCase());
+    const { data: clientes, error } = await q.order('numero_cuenta');
+    if (error || !clientes || !clientes.length) {
+      await enviarWhatsApp(NUMERO_SOPORTE, 'No encontré clientes activos para avisar.');
+      return;
+    }
+    const ok = [], mal = [];
+    for (const c of clientes) {
+      const tel10 = String(c.telefono || '').replace(/\D/g, '').slice(-10);
+      if (tel10.length !== 10) { mal.push(`${c.numero_cuenta} (sin teléfono)`); continue; }
+      const primerNombre = String(c.nombre || '').trim().split(/\s+/)[0] || 'cliente';
+      const r = await enviarWhatsAppTemplate('52' + tel10, plantilla, [primerNombre, c.numero_cuenta]);
+      if (r && !r.error && r.messages) ok.push(c.numero_cuenta);
+      else mal.push(`${c.numero_cuenta} (${(r && r.error && r.error.message) || 'error'})`);
+    }
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `📨 Aviso de número de cuenta: enviado a ${ok.length} de ${clientes.length}.` +
+        (ok.length ? `\n✅ ${ok.join(', ')}` : '') +
+        (mal.length ? `\n⚠️ No se pudo: ${mal.join('; ')}` : '')
+    );
+    return;
+  }
+
   if (comando === 'FICHAS') {
     const { data } = await supabase.from('hotspot_fichas').select('tipo, canal').eq('estado', 'disponible');
     const cuenta = {};
@@ -388,6 +418,7 @@ async function manejarComandoAdmin(texto) {
     `Comandos disponibles:\n` +
       `FICHA <HORA|DIA|SEMANA> <telefono> — envía una ficha WiFi pagada por transferencia\n` +
       `FICHAS — cuántas fichas WiFi quedan\n` +
+      `AVISO CUENTAS — manda a cada cliente activo su número de cuenta (o AVISO CUENTAS VN-005 para uno)\n` +
       `RESUELTO <id_ticket> — marca un reporte como resuelto\n` +
       `RESP <cuenta> <mensaje> — responde a un cliente (ej. RESP VN-001 Ya vamos)\n` +
       `FIN <cuenta> — termina la atención personalizada con ese cliente`
