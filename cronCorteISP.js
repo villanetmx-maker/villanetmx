@@ -77,8 +77,6 @@ async function revisarPagosYActualizarServicio() {
     const yaPago = !!pago;
     const hoyEsDiaDeCorte = new Date().getDate() >= cliente.dia_corte;
 
-    await enviarRecordatorioPagoSiAplica(cliente, yaPago);
-
     try {
       if (!yaPago && hoyEsDiaDeCorte && cliente.estado === 'activo') {
         // Suspender
@@ -121,7 +119,67 @@ async function revisarPagosYActualizarServicio() {
   console.log('Revisión de pagos ISP completada.');
 }
 
+// ---------- Recordatorio de pago mensual (dia 28) ----------
+// Cada mes, el dia VILLANET_DIA_RECORDATORIO (default 28) a las 10:00 am hora
+// de Mexico, manda la plantilla de Meta a cada cliente activo que todavia no
+// pago el mes. Plantilla: WHATSAPP_TEMPLATE_RECORDATORIO_PAGO
+// (default recordatorio_pago_villanet): {{1}} nombre, {{2}} monto, {{3}} fecha.
+const PLANTILLA_RECORDATORIO = WHATSAPP_TEMPLATE_RECORDATORIO_PAGO || 'recordatorio_pago_villanet';
+const DIA_RECORDATORIO = parseInt(process.env.VILLANET_DIA_RECORDATORIO || '28', 10);
+const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+
+async function enviarRecordatoriosDelMes() {
+  const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const anio = ahora.getFullYear(), mes = ahora.getMonth();
+  const mesActual = `${anio}-${String(mes + 1).padStart(2, '0')}-01`;
+  const ultimoDia = new Date(anio, mes + 1, 0).getDate();
+
+  const { data: clientes, error } = await supabase
+    .from('clientes_isp')
+    .select('id, nombre, telefono, numero_cuenta, dia_corte, estado, planes_isp(precio)')
+    .eq('estado', 'activo');
+  if (error) { console.error('[recordatorio] error clientes:', error.message); return; }
+
+  const enviados = [], omitidos = [], fallidos = [];
+  for (const c of clientes || []) {
+    const { data: pago } = await supabase
+      .from('pagos_isp').select('id')
+      .eq('cliente_id', c.id).eq('mes_correspondiente', mesActual).maybeSingle();
+    if (pago) { omitidos.push(c.numero_cuenta); continue; }
+
+    const tel10 = String(c.telefono || '').replace(/\D/g, '').slice(-10);
+    if (tel10.length !== 10) { fallidos.push(`${c.numero_cuenta} (sin teléfono)`); continue; }
+    const nombre = String(c.nombre || '').trim().split(/\s+/)[0] || 'cliente';
+    const monto = c.planes_isp ? Number(c.planes_isp.precio) : 0;
+    const dia = Math.min(Number(c.dia_corte) || ultimoDia, ultimoDia);
+    const fecha = `${dia} de ${MESES[mes]}`;
+    try {
+      const r = await whatsappBot.enviarWhatsAppTemplate('52' + tel10, PLANTILLA_RECORDATORIO, [
+        nombre,
+        Number.isInteger(monto) ? String(monto) : monto.toFixed(2),
+        fecha,
+      ]);
+      if (r && r.messages) enviados.push(c.numero_cuenta);
+      else fallidos.push(`${c.numero_cuenta} (${(r && r.error && r.error.message) || 'error'})`);
+    } catch (err) {
+      fallidos.push(`${c.numero_cuenta} (${err.message})`);
+    }
+  }
+
+  const admin = process.env.VILLANET_ADMIN_WHATSAPP_NUMBER || '5215546633899';
+  await whatsappBot.enviarWhatsApp(
+    admin,
+    `🔔 Recordatorio de pago del ${DIA_RECORDATORIO} enviado a ${enviados.length} cliente(s).` +
+      (enviados.length ? `\n📨 ${enviados.join(', ')}` : '') +
+      (omitidos.length ? `\n✅ Ya pagaron: ${omitidos.join(', ')}` : '') +
+      (fallidos.length ? `\n⚠️ No se pudo: ${fallidos.join('; ')}` : '')
+  );
+  console.log(`[recordatorio] enviados ${enviados.length}, pagados ${omitidos.length}, fallidos ${fallidos.length}`);
+}
+
+cron.schedule(`0 10 ${DIA_RECORDATORIO} * *`, enviarRecordatoriosDelMes, { timezone: 'America/Mexico_City' });
+
 // Corre todos los días a las 6:00 AM (hora del servidor)
 cron.schedule('0 6 * * *', revisarPagosYActualizarServicio);
 
-module.exports = { revisarPagosYActualizarServicio };
+module.exports = { revisarPagosYActualizarServicio, enviarRecordatoriosDelMes };

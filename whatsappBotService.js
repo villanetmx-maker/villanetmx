@@ -369,6 +369,35 @@ async function manejarComandoAdmin(texto) {
     return;
   }
 
+  // RECORDATORIO <VN-001> -> manda ya el recordatorio de pago a un cliente (prueba)
+  if (comando === 'RECORDATORIO' && partes[1]) {
+    const plantilla = process.env.WHATSAPP_TEMPLATE_RECORDATORIO_PAGO || 'recordatorio_pago_villanet';
+    const { data: c } = await supabase
+      .from('clientes_isp')
+      .select('nombre, telefono, numero_cuenta, dia_corte, planes_isp(precio)')
+      .eq('numero_cuenta', partes[1].toUpperCase())
+      .maybeSingle();
+    if (!c) { await enviarWhatsApp(NUMERO_SOPORTE, `No encontré la cuenta ${partes[1]}.`); return; }
+    const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+    const hoy = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const ultimo = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0).getDate();
+    const dia = Math.min(Number(c.dia_corte) || ultimo, ultimo);
+    const monto = c.planes_isp ? Number(c.planes_isp.precio) : 0;
+    const tel10 = String(c.telefono || '').replace(/\D/g, '').slice(-10);
+    const r = await enviarWhatsAppTemplate('52' + tel10, plantilla, [
+      String(c.nombre || '').trim().split(/\s+/)[0] || 'cliente',
+      Number.isInteger(monto) ? String(monto) : monto.toFixed(2),
+      `${dia} de ${MESES[hoy.getMonth()]}`,
+    ]);
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      r && r.messages
+        ? `✅ Recordatorio de pago enviado a ${c.numero_cuenta}.`
+        : `⚠️ No se pudo enviar a ${c.numero_cuenta}: ${(r && r.error && r.error.message) || 'error'}`
+    );
+    return;
+  }
+
   // AVISO CUENTAS [VN-005] -> manda la plantilla con su numero de cuenta a
   // todos los clientes activos (o solo al indicado). Plantilla en Meta:
   // WHATSAPP_TEMPLATE_NUMERO_CLIENTE (por defecto numero_cliente_villanet).
@@ -419,6 +448,7 @@ async function manejarComandoAdmin(texto) {
       `FICHA <HORA|DIA|SEMANA> <telefono> — envía una ficha WiFi pagada por transferencia\n` +
       `FICHAS — cuántas fichas WiFi quedan\n` +
       `AVISO CUENTAS — manda a cada cliente activo su número de cuenta (o AVISO CUENTAS VN-005 para uno)\n` +
+      `RECORDATORIO <cuenta> — manda ya el recordatorio de pago a un cliente (el automático sale cada día 28)\n` +
       `RESUELTO <id_ticket> — marca un reporte como resuelto\n` +
       `RESP <cuenta> <mensaje> — responde a un cliente (ej. RESP VN-001 Ya vamos)\n` +
       `FIN <cuenta> — termina la atención personalizada con ese cliente`
