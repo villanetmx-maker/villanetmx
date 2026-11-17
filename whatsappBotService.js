@@ -32,7 +32,15 @@ const NUMERO_SOPORTE = process.env.VILLANET_ADMIN_WHATSAPP_NUMBER || '5215546633
 const PHONE_NUMBER_ID = process.env.VILLANET_WHATSAPP_PHONE_NUMBER_ID;
 
 // ---------- Enviar mensaje de WhatsApp ----------
+// Numeros de 10 digitos (como se guardan en clientes_isp) se mandan con 52
+// de Mexico; si no, WhatsApp los toma como de otro pais (56 = Chile) y no llegan.
+function aWhatsApp(telefono) {
+  const d = String(telefono || '').replace(/\D/g, '');
+  return d.length === 10 ? '52' + d : d;
+}
+
 async function enviarWhatsApp(telefono, texto) {
+  telefono = aWhatsApp(telefono);
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
   try {
     const resp = await fetch(url, {
@@ -63,6 +71,7 @@ async function enviarWhatsApp(telefono, texto) {
 // escribio el cliente en las ultimas 24h), como los recordatorios de pago.
 // Meta exige un template previamente aprobado para este tipo de envio.
 async function enviarWhatsAppTemplate(telefono, nombreTemplate, parametrosTexto = []) {
+  telefono = aWhatsApp(telefono);
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
   const payload = {
     messaging_product: 'whatsapp',
@@ -153,7 +162,20 @@ async function cambiarSesionesCliente(cliente, estado) {
     .from('whatsapp_sesiones')
     .update({ estado, actualizado_en: new Date().toISOString() })
     .eq('cliente_id', cliente.id);
-  await guardarSesion(cliente.telefono, cliente.id, estado);
+  await guardarSesion(aWhatsApp(cliente.telefono), cliente.id, estado);
+}
+
+// ---------- Numero de WhatsApp con el que el cliente realmente escribe ----------
+// (el ultimo chat ligado a su cuenta; si nunca ha escrito, su telefono registrado)
+async function telefonoDeChat(cliente) {
+  const { data } = await supabase
+    .from('whatsapp_sesiones')
+    .select('telefono')
+    .eq('cliente_id', cliente.id)
+    .order('actualizado_en', { ascending: false })
+    .limit(5);
+  const real = (data || []).map((r) => String(r.telefono || '').replace(/\D/g, '')).find((t) => t.length >= 12);
+  return real || aWhatsApp(cliente.telefono);
 }
 
 // ---------- Menu principal ----------
@@ -292,7 +314,7 @@ async function manejarComandoAdmin(texto) {
       await enviarWhatsApp(NUMERO_SOPORTE, `No encontré un cliente con cuenta ${cuenta} y teléfono registrado.`);
       return;
     }
-    await enviarWhatsApp(cliente.telefono, textoRespuesta);
+    await enviarWhatsApp(await telefonoDeChat(cliente), textoRespuesta);
     await cambiarSesionesCliente(cliente, 'con_asesor');
     await enviarWhatsApp(NUMERO_SOPORTE, `↪️ Enviado a ${cliente.nombre} (${cliente.numero_cuenta}).`);
     return;
@@ -310,7 +332,7 @@ async function manejarComandoAdmin(texto) {
       return;
     }
     await cambiarSesionesCliente(cliente, 'menu');
-    await enviarWhatsApp(cliente.telefono, 'Gracias por contactarnos 🙌. Si necesitas algo más, escribe "menu".');
+    await enviarWhatsApp(await telefonoDeChat(cliente), 'Gracias por contactarnos 🙌. Si necesitas algo más, escribe "menu".');
     await enviarWhatsApp(NUMERO_SOPORTE, `🔚 Atención con ${cliente.nombre} (${cliente.numero_cuenta}) finalizada.`);
     return;
   }
