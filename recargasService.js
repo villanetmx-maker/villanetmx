@@ -328,6 +328,8 @@ function paginaRecargas() {
 <script>
 let C=null, cat=null, car=null, prod=null;
 const $=id=>document.getElementById(id);
+// Si se abre desde el WhatsApp de VillaNet trae ?tel= para dejar listo el numero
+const TEL=(new URLSearchParams(location.search).get('tel')||'').replace(/\\D/g,'').slice(-10);
 fetch('/api/recargas/catalogo').then(r=>r.json()).then(d=>{
   if(d.error){$('grid').innerHTML='<p class="sub" style="grid-column:1/-1">'+d.error+'</p>';return;}
   C=d; cat=d.categorias[0]; tabs(); grid();
@@ -357,6 +359,7 @@ function elegir(id){
   $('ref').placeholder=f.nombre; $('ref').inputMode=f.numerico?'numeric':'text'; $('ref').maxLength=f.max; $('ref').value='';
   $('ref2').placeholder='Confirma: '+f.nombre; $('ref2').maxLength=f.max; $('ref2').value=''; $('ref2').inputMode=$('ref').inputMode;
   $('ref2').classList.toggle('oculto',!f.confirmar);
+  if(TEL.length===10&&(car.categoria==='Tiempo Aire'||car.categoria==='Paquetes')&&f.numerico&&f.max>=10){$('ref').value=TEL;$('ref2').value=TEL;}
   $('paso2').classList.remove('oculto'); calc(); $('paso2').scrollIntoView({behavior:'smooth'});
 }
 function elegirProd(c){prod=C.productos.find(p=>p.codigo===c);document.querySelectorAll('.prod').forEach(b=>b.classList.toggle('on',b.dataset.c===c));$('desc').textContent=prod.descripcion||'';calc();}
