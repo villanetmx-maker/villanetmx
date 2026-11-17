@@ -3,8 +3,10 @@
  * VillaNet MX - Centro de atencion a clientes por WhatsApp
  *
  * Flujo cliente: se identifica por telefono (clientes_isp.telefono) o por
- * numero de cuenta si no coincide. Menu por numero (1-7), sin IA, para
- * maxima confiabilidad.
+ * numero de cuenta si no coincide. Menu con lista interactiva de WhatsApp
+ * (botones) y respaldo por numero (1-10), sin IA. Las funciones extra
+ * (pagos, estado de cuenta PDF, avisos, consumo, referidos...) estan en
+ * botPlusService.js.
  *
  * Canal de administrador: si el mensaje entrante viene del numero definido
  * en NUMERO_SOPORTE, se interpreta como un comando de control en vez de
@@ -21,6 +23,9 @@
  */
 const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
+// Funciones extra (menu con botones, pagos, estado de cuenta PDF, avisos...).
+// Se carga al usarse para evitar dependencias circulares.
+const plus = () => require('./botPlusService');
 
 const WHATSAPP_TOKEN = process.env.VILLANET_WHATSAPP_TOKEN;
 const NUMERO_SOPORTE = process.env.VILLANET_ADMIN_WHATSAPP_NUMBER || '5215546633899';
@@ -169,19 +174,19 @@ Responde solo con el número (o escribe "menu" en cualquier momento para volver 
 const TEXTO_FAQ = `❓ Preguntas frecuentes
 
 📶 ¿Qué hago si no tengo internet?
-Escribe "2" en el menú para reportar la falla y un técnico lo revisará.
+Primero elige "Reiniciar conexión" en el menú. Si sigue igual, "Reportar una falla" y un técnico lo revisa.
 
 💳 ¿Cómo puedo pagar?
-Transferencia SPEI o tarjeta. Escribe "4" para ver tu saldo y "5" para avisar que ya pagaste.
+Escribe *pagar*: te mandamos un link para pagar con tarjeta (se aplica al instante) o la CLABE para transferencia. Con "Estado de cuenta" recibes tu PDF con el desglose.
 
 📅 ¿Cuándo se corta el servicio si no pago?
 El servicio se suspende automáticamente el día de corte de tu plan si el mes no está pagado, y se reactiva solo al confirmar tu pago.
 
 🛠️ ¿Cuánto tarda una visita técnica?
-Depende de la disponibilidad del técnico; escribe "6" para ver si ya tienes una cita agendada.
+Depende de la disponibilidad del técnico; en "Más opciones → Mi próxima cita" ves si ya tienes una agendada.
 
 📞 ¿Cómo hablo con una persona?
-Escribe "7" para pedir que un asesor te atienda directamente por aquí.
+Elige "Hablar con asesor" y una persona te atiende por aquí.
 
 Escribe "menu" para volver a las opciones.`;
 
@@ -267,7 +272,11 @@ async function manejarComandoAdmin(texto) {
       await enviarWhatsApp(NUMERO_SOPORTE, `No encontré el ticket #${idTicket}.`);
       return;
     }
-    await enviarWhatsApp(NUMERO_SOPORTE, `✅ Ticket #${idTicket} marcado como resuelto.`);
+    const encuesta = await plus().avisarReporteResuelto(data).catch(() => false);
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `✅ Ticket #${idTicket} marcado como resuelto.` + (encuesta ? ' Se le avisó al cliente y se le mandó la encuesta.' : ' (No se pudo avisar al cliente; quizá no ha escrito en 24 h.)')
+    );
     return;
   }
 
@@ -428,6 +437,48 @@ async function manejarComandoAdmin(texto) {
     return;
   }
 
+  // AVISO FALLA <texto> -> aviso general a todos los clientes (y queda visible en el menu)
+  // AVISO LISTO [texto]  -> avisa a todos que ya quedo el servicio
+  if (comando === 'AVISO' && /^(FALLA|LISTO|OK)$/i.test(partes[1] || '')) {
+    const sub = partes[1].toUpperCase();
+    const resto = partes.slice(2).join(' ');
+    if (sub === 'FALLA' && !resto) {
+      await enviarWhatsApp(NUMERO_SOPORTE, 'Uso: AVISO FALLA <texto>\nEj: AVISO FALLA Hay una falla general en la zona por la lluvia, calculamos 2 horas.');
+      return;
+    }
+    await enviarWhatsApp(NUMERO_SOPORTE, '⏳ Enviando aviso a todos los clientes…');
+    const r = sub === 'FALLA' ? await plus().comandoAvisoFalla(resto) : await plus().comandoAvisoListo(resto);
+    await enviarWhatsApp(NUMERO_SOPORTE, r);
+    return;
+  }
+
+  // PAGO <cuenta> [monto] [efectivo] -> registra un pago por transferencia o efectivo,
+  // reactiva si estaba suspendido y le manda recibo + estado de cuenta al cliente.
+  if (comando === 'PAGO') {
+    if (!partes[1]) {
+      await enviarWhatsApp(NUMERO_SOPORTE, 'Uso: PAGO <cuenta> [monto] [efectivo]\nEj: PAGO VN-005 500   (sin monto = paga todo lo pendiente)');
+      return;
+    }
+    const metodo = /efectivo/i.test(mensaje) ? 'efectivo' : 'transferencia';
+    const monto = Number((partes[2] || '').replace(/[^\d.]/g, '')) || 0;
+    const err = await plus().registrarPagoManual(partes[1], monto, metodo).catch((e) => e.message);
+    if (err) await enviarWhatsApp(NUMERO_SOPORTE, `⚠️ ${err}`);
+    return;
+  }
+
+  // CAMBIOPLAN <cuenta> <id_plan> -> aplica un cambio de plan pedido por el cliente
+  if (comando === 'CAMBIOPLAN') {
+    const r = await plus().aplicarCambioPlan(partes[1] || '', partes[2] || '').catch((e) => `⚠️ ${e.message}`);
+    await enviarWhatsApp(NUMERO_SOPORTE, r);
+    return;
+  }
+
+  // PERFIL -> llena la descripcion del perfil de WhatsApp Business
+  if (comando === 'PERFIL') {
+    await enviarWhatsApp(NUMERO_SOPORTE, await plus().configurarPerfil());
+    return;
+  }
+
   if (comando === 'FICHAS') {
     const { data } = await supabase.from('hotspot_fichas').select('tipo, canal').eq('estado', 'disponible');
     const cuenta = {};
@@ -449,7 +500,12 @@ async function manejarComandoAdmin(texto) {
       `FICHAS — cuántas fichas WiFi quedan\n` +
       `AVISO CUENTAS — manda a cada cliente activo su número de cuenta (o AVISO CUENTAS VN-005 para uno)\n` +
       `RECORDATORIO <cuenta> — manda ya el recordatorio de pago a un cliente (el automático sale cada día 28)\n` +
-      `RESUELTO <id_ticket> — marca un reporte como resuelto\n` +
+      `PAGO <cuenta> [monto] [efectivo] — registra un pago, reactiva y le manda recibo y estado de cuenta\n` +
+      `AVISO FALLA <texto> — avisa a TODOS los clientes de una falla general\n` +
+      `AVISO LISTO — avisa a todos que el servicio ya quedó\n` +
+      `CAMBIOPLAN <cuenta> <id_plan> — aplica un cambio de plan\n` +
+      `PERFIL — actualiza la descripción del perfil de WhatsApp Business\n` +
+      `RESUELTO <id_ticket> — marca un reporte como resuelto y manda encuesta al cliente\n` +
       `RESP <cuenta> <mensaje> — responde a un cliente (ej. RESP VN-001 Ya vamos)\n` +
       `FIN <cuenta> — termina la atención personalizada con ese cliente`
   );
@@ -526,6 +582,12 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
   // transferencía, "transferencia por favor", "spei", "deposito"...
   const sinAcentos = mensaje.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   if (/^\W*(tra\w{0,3}fe\w*|transf\w*|spei|deposito)\b/.test(sinAcentos)) {
+    // Si quien escribe es cliente de internet en casa, es para su mensualidad.
+    const clienteIsp = await buscarClientePorTelefono(telefonoOrigen);
+    if (clienteIsp) {
+      await plus().iniciarPago(telefonoOrigen, clienteIsp);
+      return;
+    }
     const clabe = process.env.VILLANET_CLABE;
     const banco = process.env.VILLANET_CLABE_BANCO || '';
     const titular = process.env.VILLANET_CLABE_TITULAR || '';
@@ -568,7 +630,7 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       const encontrado = await buscarClientePorCuenta(mensaje);
       if (encontrado) {
         await guardarSesion(telefonoOrigen, encontrado.id, 'menu');
-        await enviarWhatsApp(telefonoOrigen, textoMenu(encontrado.nombre));
+        await plus().enviarMenu(telefonoOrigen, encontrado);
       } else {
         await enviarWhatsApp(
           telefonoOrigen,
@@ -577,20 +639,47 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       }
       return;
     }
+    // Alguien que no es cliente y quiere contratar (o viene recomendado)
+    if (/contrat|informes|cobertura|me recomend|instala/i.test(mensaje)) {
+      await plus().registrarProspecto(telefonoOrigen, mensaje);
+      return;
+    }
     await guardarSesion(telefonoOrigen, null, 'esperando_cuenta');
     await enviarWhatsApp(
       telefonoOrigen,
-      'Hola 👋, soy el asistente de VillaNet MX. Para ayudarte, dime tu número de cuenta (ej. VN-001).'
+      'Hola 👋, soy el asistente de VillaNet MX. Para ayudarte, dime tu número de cuenta (ej. VN-001).\n\n' +
+        '¿Aún no eres cliente y quieres contratar? Escribe *contratar*.'
     );
     return;
   }
 
   // Atajo global: escribir "menu" siempre regresa al menu principal,
   // sin importar en que paso de la conversacion estaba el cliente.
-  if (mensaje.toLowerCase() === 'menu') {
+  if (/^(menu|menú|m_menu)$/i.test(mensaje)) {
     await guardarSesion(telefonoOrigen, cliente.id, 'menu');
-    await enviarWhatsApp(telefonoOrigen, textoMenu(cliente.nombre));
+    await plus().enviarMenu(telefonoOrigen, cliente);
     return;
+  }
+
+  // Respuestas de botones que funcionan en cualquier paso de la conversacion
+  if (/^enc_\d+_\d$/.test(mensaje)) {
+    await plus().registrarCalificacion(telefonoOrigen, cliente, mensaje);
+    return;
+  }
+  if (/^plan_[\w-]+$/.test(mensaje)) {
+    await plus().solicitarPlan(telefonoOrigen, cliente, mensaje.slice(5));
+    await guardarSesion(telefonoOrigen, cliente.id, 'menu');
+    return;
+  }
+  if (mensaje === 'pago_adelantar') {
+    await plus().iniciarPago(telefonoOrigen, cliente, true);
+    await guardarSesion(telefonoOrigen, cliente.id, 'menu');
+    return;
+  }
+  // Si el cliente toca un boton del menu mientras el bot esperaba otra cosa,
+  // se respeta el boton (no se toma como descripcion de falla).
+  if (/^m_\w+$/.test(mensaje) && sesion && sesion.estado !== 'con_asesor') {
+    sesion.estado = 'menu';
   }
 
   const estadoActual = sesion ? sesion.estado : 'menu';
@@ -639,9 +728,11 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
         `Cuando lo resuelvas: RESUELTO ${ticket ? ticket.id : ''}`
     );
 
-    let respuesta = `✅ Recibimos tu reporte (folio #${ticket ? ticket.id : '?'}), en breve un técnico lo revisará.`;
+    const avisoRed = await plus().avisoActivo().catch(() => null);
+    let respuesta = `✅ Recibimos tu reporte (folio #${ticket ? ticket.id : '?'}), en breve un técnico lo revisará.` +
+      (avisoRed ? `\n\nℹ️ Tenemos una falla general reportada: ${avisoRed.texto}. Te avisamos en cuanto quede.` : '');
     if (diagnostico === 'suspendido_por_falta_de_pago') {
-      respuesta = '⚠️ Tu servicio está suspendido por falta de pago. Escribe "5" si ya realizaste tu pago para que lo verifiquemos.';
+      respuesta = '⚠️ Tu servicio está suspendido por falta de pago. Escribe *pagar* para liquidar con tarjeta o transferencia y se reactiva solo.';
     }
     await enviarWhatsApp(telefonoOrigen, respuesta);
     await guardarSesion(telefonoOrigen, cliente.id, 'menu');
@@ -670,8 +761,9 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
   }
 
   // ---- Estado 'menu' - interpretar la opcion elegida ----
-  switch (mensaje) {
-    case '1': {
+  const accion = plus().resolverAccion(mensaje);
+  switch (accion) {
+    case 'estado': {
       const estadoConn = await mikrotik.estadoConexion(cliente.mikrotik_secret_name).catch(() => null);
       let texto1;
       if (!estadoConn) {
@@ -681,18 +773,20 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       } else if (estadoConn.conectado_ahora) {
         texto1 = '✅ Tu servicio está activo y tu router está conectado ahora mismo.';
       } else {
-        texto1 = '🔴 Tu cuenta está activa, pero no detectamos tu router conectado en este momento. Revisa que tenga corriente y esté encendido.';
+        texto1 = '🔴 Tu cuenta está activa, pero no detectamos tu router conectado en este momento. Revisa que tenga corriente y esté encendido, o elige "Reiniciar conexión".';
       }
+      const avisoRed = await plus().avisoActivo().catch(() => null);
+      if (avisoRed) texto1 += `\n\n⚠️ Aviso general: ${avisoRed.texto}`;
       await enviarWhatsApp(telefonoOrigen, texto1 + '\n\nEscribe "menu" para volver a las opciones.');
       break;
     }
 
-    case '2':
+    case 'falla':
       await enviarWhatsApp(telefonoOrigen, 'Cuéntame brevemente qué problema tienes (ej. "sin internet desde ayer").');
       await guardarSesion(telefonoOrigen, cliente.id, 'esperando_descripcion_falla');
       return;
 
-    case '3': {
+    case 'reportes': {
       const tickets = await buscarTicketsAbiertos(cliente.id);
       let texto3;
       if (tickets.length === 0) {
@@ -710,27 +804,41 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       break;
     }
 
-    case '4': {
-      const { total, mesesPendientes, precio } = await calcularAdeudoDetallado(cliente);
-      let texto4;
-      if (total > 0) {
-        const detalle = mesesPendientes
-          .map((m) => `• ${m} — $${precio.toFixed(2)}`)
-          .join('\n');
-        texto4 = `Tienes ${mesesPendientes.length} mes(es) pendiente(s):\n${detalle}\n\nTotal a pagar: $${total.toFixed(2)} MXN`;
-      } else {
-        texto4 = '✅ Estás al corriente, sin saldo pendiente.';
-      }
-      await enviarWhatsApp(telefonoOrigen, texto4 + '\n\nEscribe "menu" para volver a las opciones.');
+    case 'cuenta':
+      await plus().enviarEstadoCuenta(telefonoOrigen, cliente);
       break;
-    }
 
-    case '5':
-      await enviarWhatsApp(telefonoOrigen, 'Cuéntame la fecha, monto y método con el que pagaste, para verificarlo.');
+    case 'pagar':
+      await plus().iniciarPago(telefonoOrigen, cliente);
+      break;
+
+    case 'consumo':
+      await enviarWhatsApp(telefonoOrigen, '📊 Calculando tu consumo del mes…');
+      await plus().consumoMes(telefonoOrigen, cliente);
+      break;
+
+    case 'reiniciar':
+      await plus().reiniciarConexion(telefonoOrigen, cliente);
+      break;
+
+    case 'referir':
+      await plus().referidos(telefonoOrigen, cliente);
+      break;
+
+    case 'plan':
+      await plus().mostrarPlanes(telefonoOrigen, cliente);
+      break;
+
+    case 'mas':
+      await plus().enviarMasOpciones(telefonoOrigen);
+      break;
+
+    case 'avise':
+      await enviarWhatsApp(telefonoOrigen, 'Cuéntame la fecha, monto y banco con el que pagaste. También puedes mandar aquí la foto de tu comprobante 📸.');
       await guardarSesion(telefonoOrigen, cliente.id, 'esperando_comprobante_pago');
       return;
 
-    case '6': {
+    case 'cita': {
       const orden = await buscarProximaOrden(cliente.id);
       let texto6;
       if (!orden) {
@@ -747,7 +855,7 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       break;
     }
 
-    case '7':
+    case 'asesor':
       await guardarSesion(telefonoOrigen, cliente.id, 'con_asesor');
       await enviarWhatsApp(
         telefonoOrigen,
@@ -761,15 +869,36 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       );
       return;
 
-    case '8':
+    case 'faq':
       await enviarWhatsApp(telefonoOrigen, TEXTO_FAQ);
       break;
 
     default:
-      await enviarWhatsApp(telefonoOrigen, textoMenu(cliente.nombre));
+      await plus().enviarMenu(telefonoOrigen, cliente);
   }
 
   await guardarSesion(telefonoOrigen, cliente.id, 'menu');
 }
 
-module.exports = { manejarMensajeEntrante, enviarWhatsApp, enviarWhatsAppTemplate };
+// ---------- Foto o archivo que manda un cliente (comprobante) ----------
+async function manejarMediaEntrante(telefonoOrigen, tipo, mediaId) {
+  if (esAdmin(telefonoOrigen)) return;
+  const cliente = await buscarClientePorTelefono(telefonoOrigen);
+  const etiqueta = cliente ? `${cliente.nombre} (${cliente.numero_cuenta})` : 'Un número sin cuenta';
+  await plus().reenviarMediaAlAdmin(telefonoOrigen, mediaId, tipo, etiqueta);
+  if (cliente) {
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `Si es su comprobante y ya viste el depósito, responde:\nPAGO ${cliente.numero_cuenta}\n(o PAGO ${cliente.numero_cuenta} <monto> si pagó otra cantidad)`
+    );
+    await enviarWhatsApp(telefonoOrigen, '📸 ¡Recibido! Verificamos tu pago y en cuanto se confirme te llega tu recibo y estado de cuenta por aquí. 🙌');
+  } else {
+    await enviarWhatsApp(
+      NUMERO_SOPORTE,
+      `Si es una ficha WiFi pagada por transferencia, responde:\nFICHA HORA ${telefonoOrigen}\nFICHA DIA ${telefonoOrigen}\nFICHA SEMANA ${telefonoOrigen}`
+    );
+    await enviarWhatsApp(telefonoOrigen, '📸 ¡Recibido! En un momento lo revisamos. 🙌');
+  }
+}
+
+module.exports = { manejarMensajeEntrante, manejarMediaEntrante, enviarWhatsApp, enviarWhatsAppTemplate };

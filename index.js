@@ -713,6 +713,8 @@ app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
 });
 // ---------- Webhook de WhatsApp (bot de autoservicio para clientes) ----------
 const whatsappBot = require('./whatsappBotService');
+// Pagos de mensualidad con Clip desde el chat (webhook + pagina de regreso)
+require('./botPlusService').registrarRutas(app);
 const VERIFY_TOKEN = process.env.VILLANET_WHATSAPP_VERIFY_TOKEN;
 // Verificacion inicial que pide Meta al configurar el webhook
 app.get('/webhook/whatsapp', (req, res) => {
@@ -733,9 +735,18 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const value = change && change.value;
     const mensaje = value && value.messages && value.messages[0];
     if (mensaje && mensaje.type === 'text') {
-      const telefono = mensaje.from;
-      const texto = mensaje.text.body;
-      await whatsappBot.manejarMensajeEntrante(telefono, texto);
+      await whatsappBot.manejarMensajeEntrante(mensaje.from, mensaje.text.body);
+    } else if (mensaje && mensaje.type === 'interactive') {
+      // Boton o lista del menu: se manda el id (m_pagar, plan_3, enc_12_5...)
+      const it = mensaje.interactive || {};
+      const id = (it.list_reply && it.list_reply.id) || (it.button_reply && it.button_reply.id) || '';
+      await whatsappBot.manejarMensajeEntrante(mensaje.from, id);
+    } else if (mensaje && mensaje.type === 'button') {
+      // Boton rapido de una plantilla (ej. "Pagar ahora")
+      await whatsappBot.manejarMensajeEntrante(mensaje.from, (mensaje.button && (mensaje.button.payload || mensaje.button.text)) || '');
+    } else if (mensaje && (mensaje.type === 'image' || mensaje.type === 'document')) {
+      // Foto o PDF (normalmente comprobante de pago): se reenvia al administrador
+      await whatsappBot.manejarMediaEntrante(mensaje.from, mensaje.type, mensaje[mensaje.type].id);
     }
     res.sendStatus(200);
   } catch (err) {
