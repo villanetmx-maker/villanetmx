@@ -243,6 +243,7 @@ function resolverAccion(msg) {
   if (/recomend|referid|invitar/.test(s)) return 'referir';
   if (/cambi\w* (de |mi )?plan|mas velocidad|subir (de )?plan/.test(s)) return 'plan';
   if (/^(faq|preguntas)/.test(s)) return 'faq';
+  if (/recarga|tiempo aire|saldo para|paquete/.test(s)) return 'recargas';
   if (/cita|visita/.test(s)) return 'cita';
   if (/asesor|humano|persona|agente/.test(s)) return 'asesor';
   return null;
@@ -263,7 +264,7 @@ async function enviarMenu(to, cliente) {
         { id: 'm_falla', titulo: '🛠️ Reportar una falla', desc: 'Levanta un reporte con folio' },
         { id: 'm_reiniciar', titulo: '🔄 Reiniciar conexión', desc: 'Reconectamos tu servicio en 1 minuto' },
         { id: 'm_consumo', titulo: '📊 ¿Cuánto he usado?', desc: 'Tu consumo de datos de este mes' },
-        { id: 'm_reportes', titulo: '📋 Mis reportes', desc: 'Seguimiento de tus folios' },
+        { id: 'm_recargas', titulo: '📱 Recargas y servicios', desc: 'Tiempo aire, paquetes, CFE, Telmex y más' },
       ],
     },
     {
@@ -298,6 +299,7 @@ function textoMenuPlano(cliente) {
 8️⃣ Reiniciar mi conexión
 9️⃣ Hablar con un asesor
 🔟 Más opciones
+📱 Para recargas de tiempo aire escribe *recarga*.
 Responde con el número.`;
 }
 
@@ -308,6 +310,7 @@ async function enviarMasOpciones(to) {
       filas: [
         { id: 'm_plan', titulo: '🚀 Cambiar de plan', desc: 'Más velocidad o un plan a tu medida' },
         { id: 'm_referir', titulo: '🎁 Recomienda y gana', desc: `Gana ${PREMIO_REFERIDO} por cada amigo` },
+        { id: 'm_reportes', titulo: '📋 Mis reportes', desc: 'Seguimiento de tus folios' },
         { id: 'm_cita', titulo: '📅 Mi próxima cita', desc: 'Visitas técnicas programadas' },
         { id: 'm_faq', titulo: '❓ Preguntas frecuentes', desc: 'Pagos, cortes, soporte' },
         { id: 'm_menu', titulo: '⬅️ Menú principal' },
@@ -637,6 +640,21 @@ async function consumoMes(to, cliente) {
 }
 
 // ============================================================
+// Recargas de tiempo aire, paquetes y pago de servicios (Taecel)
+// ============================================================
+async function enviarRecargas(to) {
+  const tel = tel10(to);
+  await texto(
+    to,
+    `📱 *Recargas y pago de servicios VillaNet*\n` +
+      `Tiempo aire y paquetes: Telcel, AT&T, Movistar, Bait, Unefon, Virgin y más.\n` +
+      `Servicios: CFE, Telmex, Izzi, Totalplay, Sky, Netflix y más.\n\n` +
+      `Paga con tarjeta y se aplica al momento 👇\n${BASE_URL}/recargas${tel.length === 10 ? `?tel=${tel}` : ''}\n\n` +
+      `Tu número ya va puesto para la recarga; si es para otro número, solo cámbialo.`
+  );
+}
+
+// ============================================================
 // 8) Referidos
 // ============================================================
 async function referidos(to, cliente) {
@@ -791,6 +809,7 @@ module.exports = {
   registrarCalificacion,
   consumoMes,
   referidos,
+  enviarRecargas,
   registrarProspecto,
   mostrarPlanes,
   solicitarPlan,
