@@ -792,7 +792,81 @@ a{display:inline-block;margin-top:12px;background:#25D366;color:#fff;padding:12p
   }, 5 * 60 * 1000);
 }
 
+// ============================================================
+// Usado por el PANEL
+// ============================================================
+// Numero de WhatsApp con el que el cliente realmente escribe (ultima sesion), o su telefono con 52.
+async function telefonoChat(cliente) {
+  const { data } = await supabase
+    .from('whatsapp_sesiones')
+    .select('telefono')
+    .eq('cliente_id', cliente.id)
+    .order('actualizado_en', { ascending: false })
+    .limit(5);
+  const real = (data || []).map((r) => String(r.telefono || '').replace(/\D/g, '')).find((t) => t.length >= 12);
+  return real || '52' + tel10(cliente.telefono);
+}
+
+// Despues de registrar un pago desde el panel: recibo + estado de cuenta al cliente y aviso al admin.
+async function notificarPagoPanel(clienteId, mes, monto, metodo, reactivado) {
+  const cliente = await cargarCliente(clienteId);
+  if (!cliente || !cliente.telefono) return { ok: false, motivo: 'sin teléfono' };
+  const to = await telefonoChat(cliente);
+  const metodos = { efectivo: 'Efectivo', transferencia: 'Transferencia', spei: 'Transferencia SPEI', tarjeta: 'Tarjeta', clip_tarjeta: 'Tarjeta' };
+  const r = await texto(
+    to,
+    `✅ *Pago recibido* — ¡Gracias, ${primerNombre(cliente.nombre)}!\n\n` +
+      `Cuenta: ${cliente.numero_cuenta}\nConcepto: Mensualidad ${nombreMes(String(mes).slice(0, 7))}\n` +
+      `Monto: ${dinero(monto)} MXN\nMétodo: ${metodos[metodo] || metodo || '—'}` +
+      (reactivado ? '\n\n🟢 Tu servicio ya fue reactivado. Si no navegas en 2 minutos, apaga y prende tu módem.' : '') +
+      '\n\nTe mando tu estado de cuenta actualizado 👇'
+  );
+  if (!r || !r.messages) return { ok: false, motivo: 'WhatsApp no lo entregó (el cliente no ha escrito en 24 h)' };
+  await enviarEstadoCuenta(to, cliente, true);
+  return { ok: true };
+}
+
+async function enviarEstadoCuentaPanel(clienteId) {
+  const cliente = await cargarCliente(clienteId);
+  if (!cliente || !cliente.telefono) return { ok: false, motivo: 'sin teléfono' };
+  const to = await telefonoChat(cliente);
+  const r = await texto(to, `Hola ${primerNombre(cliente.nombre)} 👋, te compartimos tu estado de cuenta de VillaNet MX 👇`);
+  if (!r || !r.messages) return { ok: false, motivo: 'WhatsApp no lo entregó (el cliente no ha escrito en 24 h)' };
+  await enviarEstadoCuenta(to, cliente, true);
+  return { ok: true };
+}
+
+async function pdfEstadoCuenta(clienteId) {
+  const cliente = await cargarCliente(clienteId);
+  if (!cliente) throw new Error('Cliente no encontrado');
+  const a = await adeudo(cliente);
+  const pagosPorMes = {};
+  for (const p of a.pagos) {
+    const k = String(p.mes_correspondiente).slice(0, 7);
+    if (!pagosPorMes[k]) pagosPorMes[k] = { ...p, monto: 0 };
+    pagosPorMes[k].monto += Number(p.monto);
+  }
+  const hoy = hoyMx();
+  const alta = new Date(cliente.fecha_alta || hoy);
+  const c = new Date(Math.max(new Date(alta.getFullYear(), alta.getMonth(), 1), new Date(hoy.getFullYear(), hoy.getMonth() - 11, 1)));
+  const fin = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+  for (const k of Object.keys(pagosPorMes)) { const [y, m] = k.split('-').map(Number); const d = new Date(y, m - 1, 1); if (d > fin) fin.setTime(d.getTime()); }
+  const filas = [];
+  while (c <= fin) {
+    const k = claveMes(c), p = pagosPorMes[k];
+    filas.push({ mes: k, pagado: !!p, fecha: p && (p.fecha_pago || p.created_at), metodo: p && p.metodo, monto: p && p.monto });
+    c.setMonth(c.getMonth() + 1);
+  }
+  filas.reverse();
+  const buffer = await generarEstadoCuentaPdf({ cliente, filas, mesesPendientes: a.pendientes, precio: a.precio, banco: datosBanco() });
+  return { buffer, nombre: `EstadoCuenta_${cliente.numero_cuenta}_${claveMes(hoy)}.pdf` };
+}
+
 module.exports = {
+  telefonoChat,
+  notificarPagoPanel,
+  enviarEstadoCuentaPanel,
+  pdfEstadoCuenta,
   registrarRutas,
   resolverAccion,
   enviarMenu,

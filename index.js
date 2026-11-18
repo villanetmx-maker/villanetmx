@@ -3,6 +3,52 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ============================================================
+// SEGURIDAD: las rutas de administracion (/api/... y /estado/...) piden la
+// clave del panel en el encabezado "x-panel-token". La clave vive SOLO en
+// Render (variable VILLANET_PANEL_TOKEN), nunca en GitHub ni en el HTML.
+// Quedan publicas (tienen su propia proteccion o son para clientes):
+//   fichas (/api/hotspot), recargas (/api/recargas), consumo del router
+//   (/api/consumo, usa su token), aviso del tunel (POST /api/monitor-tunel),
+//   webhooks y paginas de pago.
+// ============================================================
+const crypto = require('crypto');
+const PANEL_TOKEN = process.env.VILLANET_PANEL_TOKEN || '';
+const RUTAS_PUBLICAS = [/^\/api\/hotspot\//, /^\/api\/recargas\//, /^\/api\/consumo(\/|$)/];
+const fallosPorIp = new Map();
+
+function tokenValido(t) {
+  if (!PANEL_TOKEN || typeof t !== 'string') return false;
+  const a = Buffer.from(t), b = Buffer.from(PANEL_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+app.use((req, res, next) => {
+  const p = req.path;
+  const esAdmin = p.startsWith('/api/') || p.startsWith('/estado/');
+  if (!esAdmin || req.method === 'OPTIONS') return next();
+  if (RUTAS_PUBLICAS.some((r) => r.test(p))) return next();
+  if (p === '/api/monitor-tunel' && req.method === 'POST') return next();
+
+  if (!PANEL_TOKEN) {
+    return res.status(503).json({ error: 'Falta configurar VILLANET_PANEL_TOKEN en Render' });
+  }
+  const ip = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  const f = fallosPorIp.get(ip);
+  if (f && f.n >= 20 && Date.now() - f.desde < 15 * 60 * 1000) {
+    return res.status(429).json({ error: 'Demasiados intentos. Espera 15 minutos.' });
+  }
+  if (tokenValido(req.headers['x-panel-token'])) {
+    fallosPorIp.delete(ip);
+    return next();
+  }
+  const reg = f && Date.now() - f.desde < 15 * 60 * 1000 ? f : { n: 0, desde: Date.now() };
+  reg.n++;
+  fallosPorIp.set(ip, reg);
+  if (reg.n === 20) console.warn(`[seguridad] 20 intentos fallidos al panel desde ${ip}`);
+  return res.status(401).json({ error: 'No autorizado' });
+});
 const supabase = require('./supabaseClient');
 const mikrotik = require('./mikrotikService');
 const openpay = require('./openpayService');
@@ -252,7 +298,14 @@ app.post('/api/pagos', async (req, res) => {
       await mikrotik.reactivarCliente(cliente.mikrotik_secret_name);
       await supabase.from('clientes_isp').update({ estado: 'activo' }).eq('id', cliente_id);
     }
-    res.json({ ok: true, pago });
+    // Recibo + estado de cuenta por WhatsApp (se puede desactivar con notificar:false)
+    let whatsapp = null;
+    if (req.body.notificar !== false) {
+      whatsapp = await require('./botPlusService')
+        .notificarPagoPanel(cliente_id, mes_correspondiente, monto, metodo, !!(cliente && cliente.estado === 'suspendido'))
+        .catch((e) => ({ ok: false, motivo: e.message }));
+    }
+    res.json({ ok: true, pago, whatsapp });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -564,7 +617,12 @@ app.put('/api/tickets/:id', async (req, res) => {
       .select()
       .single();
     if (error) throw new Error(error.message);
-    res.json({ ok: true, ticket: data });
+    // Al resolver: avisar al cliente y mandarle la encuesta de satisfaccion
+    let encuesta = null;
+    if (estado === 'resuelto' && req.body.notificar !== false) {
+      encuesta = await require('./botPlusService').avisarReporteResuelto(data).catch(() => false);
+    }
+    res.json({ ok: true, ticket: data, encuesta: !!encuesta });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -715,6 +773,8 @@ app.post('/api/ordenes/:id/recordatorio', async (req, res) => {
 const whatsappBot = require('./whatsappBotService');
 // Pagos de mensualidad con Clip desde el chat (webhook + pagina de regreso)
 require('./botPlusService').registrarRutas(app);
+// Funciones extra del panel (consumo, fichas, recargas, avisos, prospectos...)
+require('./panelService')(app);
 const VERIFY_TOKEN = process.env.VILLANET_WHATSAPP_VERIFY_TOKEN;
 // Verificacion inicial que pide Meta al configurar el webhook
 app.get('/webhook/whatsapp', (req, res) => {
