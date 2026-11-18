@@ -196,7 +196,7 @@ Responde solo con el número (o escribe "menu" en cualquier momento para volver 
 const TEXTO_FAQ = `❓ Preguntas frecuentes
 
 📶 ¿Qué hago si no tengo internet?
-Primero elige "Reiniciar conexión" en el menú. Si sigue igual, "Reportar una falla" y un técnico lo revisa.
+Elige "Reportar una falla": el bot revisa tu conexión al momento y te dice qué hacer. Si va lento (no caído), elige "¿Por qué va lento?".
 
 💳 ¿Cómo puedo pagar?
 Escribe *pagar*: te mandamos un link para pagar con tarjeta (se aplica al instante) o la CLABE para transferencia. Con "Estado de cuenta" recibes tu PDF con el desglose.
@@ -688,6 +688,17 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
     await guardarSesion(telefonoOrigen, cliente.id, 'menu');
     return;
   }
+  // Botones del autodiagnostico de fallas
+  if (mensaje === 'falla_reportar') {
+    await enviarWhatsApp(telefonoOrigen, 'Va, levantamos tu reporte 🛠️. Cuéntame brevemente qué problema tienes (ej. "sin internet desde ayer").');
+    await guardarSesion(telefonoOrigen, cliente.id, 'esperando_descripcion_falla');
+    return;
+  }
+  if (mensaje === 'falla_ok') {
+    await enviarWhatsApp(telefonoOrigen, '¡Qué bueno que ya funciona! 🙌 Si vuelve a fallar, escríbenos por aquí. Escribe "menu" para ver más opciones.');
+    await guardarSesion(telefonoOrigen, cliente.id, 'menu');
+    return;
+  }
   if (mensaje === 'pago_adelantar') {
     await plus().iniciarPago(telefonoOrigen, cliente, true);
     await guardarSesion(telefonoOrigen, cliente.id, 'menu');
@@ -798,10 +809,20 @@ async function manejarMensajeEntrante(telefonoOrigen, texto) {
       break;
     }
 
-    case 'falla':
-      await enviarWhatsApp(telefonoOrigen, 'Cuéntame brevemente qué problema tienes (ej. "sin internet desde ayer").');
-      await guardarSesion(telefonoOrigen, cliente.id, 'esperando_descripcion_falla');
-      return;
+    case 'falla': {
+      // Primero se revisa la conexion; solo se pide descripcion si hace falta ticket
+      const seguir = await plus().iniciarReporteFalla(telefonoOrigen, cliente);
+      if (seguir) {
+        await enviarWhatsApp(telefonoOrigen, 'Cuéntame brevemente qué problema tienes (ej. "sin internet desde ayer").');
+        await guardarSesion(telefonoOrigen, cliente.id, 'esperando_descripcion_falla');
+        return;
+      }
+      break;
+    }
+
+    case 'lento':
+      await plus().porQueVaLento(telefonoOrigen, cliente);
+      break;
 
     case 'reportes': {
       const tickets = await buscarTicketsAbiertos(cliente.id);

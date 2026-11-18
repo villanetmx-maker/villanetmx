@@ -243,6 +243,7 @@ function resolverAccion(msg) {
   if (/recomend|referid|invitar/.test(s)) return 'referir';
   if (/cambi\w* (de |mi )?plan|mas velocidad|subir (de )?plan/.test(s)) return 'plan';
   if (/^(faq|preguntas)/.test(s)) return 'faq';
+  if (/lent[oa]|lentitud|se traba|no carga|se corta|intermitente|va mal|muy mal/.test(s)) return 'lento';
   if (/recarga|tiempo aire|saldo para|paquete/.test(s)) return 'recargas';
   if (/cita|visita/.test(s)) return 'cita';
   if (/asesor|humano|persona|agente/.test(s)) return 'asesor';
@@ -263,7 +264,7 @@ async function enviarMenu(to, cliente) {
         { id: 'm_estado', titulo: '📶 Estado de conexión', desc: 'Revisa si tu internet está en línea' },
         { id: 'm_falla', titulo: '🛠️ Reportar una falla', desc: 'Levanta un reporte con folio' },
         { id: 'm_reiniciar', titulo: '🔄 Reiniciar conexión', desc: 'Reconectamos tu servicio en 1 minuto' },
-        { id: 'm_consumo', titulo: '📊 ¿Cuánto he usado?', desc: 'Tu consumo de datos de este mes' },
+        { id: 'm_lento', titulo: '🐢 ¿Por qué va lento?', desc: 'Revisamos la red y tu conexión ahora' },
         { id: 'm_recargas', titulo: '📱 Recargas y servicios', desc: 'Tiempo aire, paquetes, CFE, Telmex y más' },
       ],
     },
@@ -300,6 +301,7 @@ function textoMenuPlano(cliente) {
 9️⃣ Hablar con un asesor
 🔟 Más opciones
 📱 Para recargas de tiempo aire escribe *recarga*.
+🐢 Si tu internet va lento escribe *lento*.
 Responde con el número.`;
 }
 
@@ -311,6 +313,7 @@ async function enviarMasOpciones(to) {
         { id: 'm_plan', titulo: '🚀 Cambiar de plan', desc: 'Más velocidad o un plan a tu medida' },
         { id: 'm_referir', titulo: '🎁 Recomienda y gana', desc: `Gana ${PREMIO_REFERIDO} por cada amigo` },
         { id: 'm_reportes', titulo: '📋 Mis reportes', desc: 'Seguimiento de tus folios' },
+        { id: 'm_consumo', titulo: '📊 ¿Cuánto he usado?', desc: 'Tu consumo de datos de este mes' },
         { id: 'm_cita', titulo: '📅 Mi próxima cita', desc: 'Visitas técnicas programadas' },
         { id: 'm_faq', titulo: '❓ Preguntas frecuentes', desc: 'Pagos, cortes, soporte' },
         { id: 'm_menu', titulo: '⬅️ Menú principal' },
@@ -640,6 +643,139 @@ async function consumoMes(to, cliente) {
 }
 
 // ============================================================
+// Autodiagnostico: "Reportar una falla" y "¿Por que va lento?"
+// ============================================================
+const CAP_BAJADA = Number(process.env.VILLANET_CAPACIDAD_BAJADA_MBPS || 150);
+const CAP_SUBIDA = Number(process.env.VILLANET_CAPACIDAD_SUBIDA_MBPS || 21);
+
+// Estado de la sesion PPPoE del cliente en el router (con limite de 10 s)
+async function diagnosticarCliente(cliente) {
+  try {
+    const est = await Promise.race([
+      mikrotik.estadoConexion(cliente.mikrotik_secret_name),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('tiempo agotado')), 10000)),
+    ]);
+    if (est && est.suspendido_por_falta_pago) return 'suspendido';
+    if (est && est.conectado_ahora) return 'conectado';
+    if (est && est.conectado_ahora === false) return 'desconectado';
+    return 'no_verificable';
+  } catch (e) {
+    return 'no_verificable';
+  }
+}
+
+// Carga actual del Starlink, de las 2 ultimas mediciones que manda el hEX
+async function cargaRed() {
+  const { data } = await supabase.from('consumo_muestras').select('creada_at, datos').order('creada_at', { ascending: false }).limit(2);
+  if (!data || data.length < 2) return null;
+  const [b, a] = data;
+  const edadMin = (Date.now() - new Date(b.creada_at)) / 60000;
+  const seg = (new Date(b.creada_at) - new Date(a.creada_at)) / 1000;
+  if (edadMin > 15 || seg < 60 || seg > 1200) return null; // datos viejos: no se puede medir
+  const leer = (txt) => { const m = /(?:^|,)ether1:(\d+):(\d+)/.exec(txt || ''); return m ? { rx: Number(m[1]), tx: Number(m[2]) } : null; };
+  const x = leer(a.datos), y = leer(b.datos);
+  if (!x || !y || y.rx < x.rx || y.tx < x.tx) return null;
+  const bajada = ((y.rx - x.rx) * 8) / seg / 1e6;
+  const subida = ((y.tx - x.tx) * 8) / seg / 1e6;
+  const pct = Math.round(Math.max(bajada / CAP_BAJADA, subida / CAP_SUBIDA) * 100);
+  const hora = hoyMx().getHours();
+  return { bajada, subida, pct, horaPico: pct >= 70 || ((hora >= 19 || hora < 1) && pct >= 50) };
+}
+
+async function avisarSuspendido(to) {
+  await botones(to, '⚠️ Tu servicio está suspendido por falta de pago. Paga con tarjeta o transferencia y se reactiva solo en minutos.', [
+    { id: 'm_pagar', titulo: '💳 Pagar ahora' },
+    { id: 'm_menu', titulo: 'Menú' },
+  ]);
+}
+
+async function pasosModemDesconectado(to) {
+  await botones(
+    to,
+    '🔴 Revisé y *tu módem no está conectado* a nuestra red en este momento.\n\n' +
+      'Por favor revisa:\n1️⃣ Que el módem tenga luz y esté conectado a la corriente.\n' +
+      '2️⃣ Que los cables estén bien puestos (sobre todo el que viene de la antena).\n' +
+      '3️⃣ Apágalo 30 segundos y vuelve a prenderlo; espera 2 minutos.\n\n¿Ya volvió tu internet?',
+    [
+      { id: 'falla_ok', titulo: '✅ Ya funciona' },
+      { id: 'falla_reportar', titulo: '❌ Sigue sin servicio' },
+    ]
+  );
+}
+
+// Paso 1 de "Reportar una falla": revisar antes de levantar ticket.
+// Regresa true si ya se debe pedir la descripcion (y levantar ticket).
+async function iniciarReporteFalla(to, cliente) {
+  const aviso = await avisoActivo().catch(() => null);
+  if (aviso) {
+    await botones(to, `ℹ️ Ya tenemos identificada una *falla general* en la zona:\n${aviso.texto}\n\nEstamos trabajando para restablecer el servicio y te avisamos por aquí en cuanto quede.`, [
+      { id: 'falla_reportar', titulo: 'Reportar otra cosa' },
+      { id: 'm_menu', titulo: 'Menú' },
+    ]);
+    return false;
+  }
+  await texto(to, '🔎 Dame unos segundos, estoy revisando tu conexión…');
+  const d = await diagnosticarCliente(cliente);
+  if (d === 'suspendido') { await avisarSuspendido(to); return false; }
+  if (d === 'desconectado') { await pasosModemDesconectado(to); return false; }
+  if (d === 'conectado') {
+    await botones(
+      to,
+      '🟢 Revisé y *tu módem sí está conectado* a nuestra red, así que la señal llega hasta tu casa.\n\n' +
+        'Muchas veces se arregla reiniciando la conexión. Si tu internet va lento (no caído), elige "¿Por qué va lento?".',
+      [
+        { id: 'm_reiniciar', titulo: '🔄 Reiniciar conexión' },
+        { id: 'm_lento', titulo: '🐢 Va lento' },
+        { id: 'falla_reportar', titulo: '🛠️ Levantar reporte' },
+      ]
+    );
+    return false;
+  }
+  // No se pudo verificar: se avisa al asesor de inmediato y se sigue con el reporte
+  await texto(to, 'No puedo verificar tu conexión en este momento, pero *ya alerté a un asesor* para resolverlo lo antes posible. 🙌');
+  await texto(NUMERO_SOPORTE, `🚨 ${cliente.nombre} (${cliente.numero_cuenta}) reporta falla y NO pude verificar su conexión (el router no respondió). Revisa el túnel/hEX.`);
+  return true;
+}
+
+async function porQueVaLento(to, cliente) {
+  const aviso = await avisoActivo().catch(() => null);
+  if (aviso) {
+    await texto(to, `ℹ️ Tenemos una *falla general* identificada:\n${aviso.texto}\n\nEstamos trabajando para restablecer el servicio y te avisamos por aquí en cuanto quede. 🙏`);
+    return;
+  }
+  await texto(to, '🔎 Estoy revisando la red y tu conexión…');
+  const [d, red] = await Promise.all([diagnosticarCliente(cliente), cargaRed().catch(() => null)]);
+  if (d === 'suspendido') { await avisarSuspendido(to); return; }
+  if (d === 'desconectado') { await pasosModemDesconectado(to); return; }
+  if (red && red.horaPico) {
+    await botones(
+      to,
+      `📶 En este momento es *hora pico*: muchos vecinos están conectados al mismo tiempo y la red está muy ocupada (${Math.min(red.pct, 100)}% de uso).\n\n` +
+        'Estamos trabajando para estabilizar la señal en estos horarios. Normalmente mejora en un rato.\n\n' +
+        '💡 Tip: si usas WiFi, acércate al módem o conecta tu equipo con cable; los videos en HD consumen mucho.',
+      [
+        { id: 'm_reiniciar', titulo: '🔄 Reiniciar conexión' },
+        { id: 'm_menu', titulo: 'Menú' },
+      ]
+    );
+    await texto(NUMERO_SOPORTE, `🐢 ${cliente.nombre} (${cliente.numero_cuenta}) reporta lentitud en hora pico. Red al ${red.pct}% (⬇️ ${red.bajada.toFixed(1)} / ⬆️ ${red.subida.toFixed(1)} Mbps).`);
+    return;
+  }
+  await botones(
+    to,
+    (red ? `📶 La red está tranquila ahorita (${red.pct}% de uso)` : '📶 Tu módem está conectado a nuestra red') +
+      ', así que la lentitud puede venir de tu conexión o de tu WiFi.\n\n' +
+      '1️⃣ Reinicia tu conexión con el botón de abajo.\n2️⃣ Apaga y prende tu módem.\n3️⃣ Prueba cerca del módem o con cable.\n\nSi sigue lento, levanta un reporte y un técnico lo revisa.',
+    [
+      { id: 'm_reiniciar', titulo: '🔄 Reiniciar conexión' },
+      { id: 'falla_reportar', titulo: '🛠️ Levantar reporte' },
+      { id: 'm_menu', titulo: 'Menú' },
+    ]
+  );
+  if (!red) await texto(NUMERO_SOPORTE, `🐢 ${cliente.nombre} (${cliente.numero_cuenta}) reporta lentitud. No pude medir la carga de la red (el hEX no ha mandado datos recientes).`);
+}
+
+// ============================================================
 // Recargas de tiempo aire, paquetes y pago de servicios (Taecel)
 // ============================================================
 async function enviarRecargas(to) {
@@ -884,6 +1020,9 @@ module.exports = {
   consumoMes,
   referidos,
   enviarRecargas,
+  iniciarReporteFalla,
+  porQueVaLento,
+  diagnosticarCliente,
   registrarProspecto,
   mostrarPlanes,
   solicitarPlan,
