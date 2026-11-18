@@ -188,6 +188,12 @@ module.exports = function registrarPanel(app) {
     res.json(data || []);
   });
 
+  // ---------- Numeros de cuenta que se pueden reutilizar (clientes dados de baja) ----------
+  ruta('get', '/api/panel/cuentas-libres', async (req, res) => {
+    const { data } = await supabase.from('clientes_isp').select('id, numero_cuenta, nombre, estado').eq('estado', 'baja');
+    res.json((data || []).filter((c) => /^VN-\d+$/.test(c.numero_cuenta)).sort((a, b) => a.numero_cuenta.localeCompare(b.numero_cuenta)));
+  });
+
   // ---------- Acciones sobre un cliente ----------
   ruta('post', '/api/panel/clientes/:id/enviar-estado-cuenta', async (req, res) => {
     res.json(await plus().enviarEstadoCuentaPanel(req.params.id));

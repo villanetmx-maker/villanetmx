@@ -163,23 +163,56 @@ app.post('/api/clientes', async (req, res) => {
       .eq('id', plan_id)
       .single();
     if (planError) throw new Error('Plan no encontrado');
-    const { data: existentes } = await supabase
-      .from('clientes_isp')
-      .select('mikrotik_secret_name, numero_cuenta')
-      .order('id', { ascending: false })
-      .limit(1);
-    let siguienteNum = 1;
-    if (existentes && existentes.length > 0) {
-      const ultimo = existentes[0].mikrotik_secret_name.replace('cliente', '');
-      siguienteNum = parseInt(ultimo, 10) + 1;
+    let secretName, numeroCuenta, viejoId = null;
+    const reusar = String(req.body.reusar_cuenta || '').trim().toUpperCase();
+    if (reusar) {
+      // Reutilizar el numero de un cliente dado de baja: el registro viejo se
+      // ARCHIVA (conserva sus pagos para la contabilidad) y libera su numero.
+      const { data: viejo } = await supabase
+        .from('clientes_isp')
+        .select('id, estado, mikrotik_secret_name')
+        .eq('numero_cuenta', reusar)
+        .maybeSingle();
+      if (!viejo || viejo.estado !== 'baja') throw new Error(`${reusar} no está libre (solo se reutilizan cuentas dadas de baja)`);
+      numeroCuenta = reusar;
+      secretName = viejo.mikrotik_secret_name;
+      viejoId = viejo.id;
+      const sufijo = '-baja' + viejo.id;
+      const { error: archErr } = await supabase
+        .from('clientes_isp')
+        .update({ numero_cuenta: reusar + sufijo, mikrotik_secret_name: secretName + sufijo })
+        .eq('id', viejo.id);
+      if (archErr) throw new Error('No se pudo archivar la cuenta anterior: ' + archErr.message);
+      // El usuario PPPoE viejo (deshabilitado) se borra del router para crearlo limpio
+      try { await mikrotik.eliminarCliente(secretName); } catch (e) { console.warn('[reusar] no se pudo borrar el secret viejo:', e.message); }
+    } else {
+      // Siguiente numero = el mas alto que exista + 1 (incluye bajas y archivados)
+      const { data: todos } = await supabase.from('clientes_isp').select('mikrotik_secret_name, numero_cuenta');
+      let max = 0;
+      for (const c of todos || []) {
+        for (const v of [c.mikrotik_secret_name, c.numero_cuenta]) {
+          const m = /(?:cliente|VN-)(\d+)/.exec(v || '');
+          if (m) max = Math.max(max, parseInt(m[1], 10));
+        }
+      }
+      secretName = 'cliente' + String(max + 1).padStart(3, '0');
+      numeroCuenta = 'VN-' + String(max + 1).padStart(3, '0');
     }
-    const secretName = 'cliente' + String(siguienteNum).padStart(3, '0');
-    const numeroCuenta = 'VN-' + String(siguienteNum).padStart(3, '0');
-    await mikrotik.crearCliente({
-      nombre_secret: secretName,
-      password,
-      profile: plan.mikrotik_profile_name,
-    });
+    try {
+      await mikrotik.crearCliente({
+        nombre_secret: secretName,
+        password,
+        profile: plan.mikrotik_profile_name,
+      });
+    } catch (e) {
+      if (viejoId) {
+        // No se pudo crear en el router: se regresa el numero a la cuenta vieja
+        await supabase.from('clientes_isp')
+          .update({ numero_cuenta: numeroCuenta, mikrotik_secret_name: secretName })
+          .eq('id', viejoId);
+      }
+      throw e;
+    }
     const { data: nuevo, error: insertError } = await supabase
       .from('clientes_isp')
       .insert({
